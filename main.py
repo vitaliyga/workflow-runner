@@ -889,6 +889,12 @@ def _make_run_id() -> str:
     return time.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(3)
 
 
+def _safe_tag(s: str | None, fallback: str) -> str:
+    """Filesystem/S3-safe slug for naming (e.g. the CSV 'girl' value)."""
+    slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", (s or "").strip()).strip("_")
+    return slug or fallback
+
+
 def _run_day_tag(run_id: str) -> str:
     prefix = run_id.split("-", 1)[0]
     try:
@@ -1423,7 +1429,9 @@ async def _video_handle(
         remote_image = await client.upload_image(local_img)
 
     day_tag = _run_day_tag(state.run_id)
-    prefix = f"video/{day_tag}/{job.scenario or 'run'}/{idx:05d}_seed{job.seed}"
+    # folder/filename carry the CSV 'girl' value so outputs are grouped per subject
+    girl_tag = _safe_tag(job.girl, f"{idx:05d}")
+    prefix = f"video/{day_tag}/{girl_tag}/{girl_tag}_{idx:05d}_seed{job.seed}"
 
     # CSV row -> field-key values. Only fields present in the flow's mapping
     # are patched; everything else keeps the template default.
@@ -1457,7 +1465,7 @@ async def _video_handle(
     # Download all outputs (video files). Top-level folder = run date (DD-MM),
     # then the previous per-job layout. This propagates everywhere rel paths
     # are used: local outputs, S3 key, status files list, thumbnails, archive.
-    out_dir = state.dir / "outputs" / day_tag / f"{idx:05d}"
+    out_dir = state.dir / "outputs" / day_tag / girl_tag
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Save node = VHS_VideoCombine (detect its id from the template).
