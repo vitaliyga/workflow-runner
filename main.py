@@ -1454,8 +1454,10 @@ async def _video_handle(
     prompt_id = await client.submit(wf)
     entry = await client.wait(prompt_id)
 
-    # Download all outputs (video files)
-    out_dir = state.dir / "outputs" / f"{idx:05d}"
+    # Download all outputs (video files). Top-level folder = run date (DD-MM),
+    # then the previous per-job layout. This propagates everywhere rel paths
+    # are used: local outputs, S3 key, status files list, thumbnails, archive.
+    out_dir = state.dir / "outputs" / day_tag / f"{idx:05d}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Save node = VHS_VideoCombine (detect its id from the template).
