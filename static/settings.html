@@ -74,6 +74,7 @@
       </label>
     </div>
     <div id="wf-msg" class="muted"></div>
+    <div id="wf-panel"></div>
   </section>
 
   <section class="card">
@@ -198,11 +199,13 @@ async function loadWorkflows() {
       <td>${wired ? `<span style="color:#6c6">✓ ${stem}</span>`
                   : `<span style="color:#fc6">не зарегистрирован</span>`}</td>
       <td>
+        <button class="ghost cfg" data-n="${f.name}">⚙ CSV-поля</button>
         <button class="ghost reg" data-n="${f.name}">${wired ? "Re-register" : "Register"}</button>
         <button class="ghost del" data-n="${f.name}">×</button>
       </td>`;
     tbody.appendChild(tr);
   }
+  tbody.querySelectorAll("button.cfg").forEach(b => b.onclick = () => configureWf(b.dataset.n));
   tbody.querySelectorAll("button.reg").forEach(b => b.onclick = async () => {
     const msg = document.querySelector("#wf-msg");
     msg.textContent = "регистрирую...";
@@ -213,13 +216,23 @@ async function loadWorkflows() {
                             body: "{}" });
     if (r.ok) {
       const { key, mapping } = await r.json();
-      msg.textContent = `✓ ${key} зарегистрирован: ` +
-        `KSampler=${mapping.ksampler?.node}, ` +
-        `pos=${mapping.positive_prompt?.node}, ` +
-        `neg=${mapping.negative_prompt?.node}, ` +
-        `image=${mapping.load_images?.main?.node}, ` +
-        `save=[${(mapping.save_images||[]).join(",")}], ` +
-        `lora=[${(mapping.lora_loaders||[]).map(l=>l.node).join(",")||"—"}]`;
+      if (mapping.is_video) {
+        const cols = Object.keys(mapping.video_fields || {});
+        msg.innerHTML = `✓ <b>${key}</b> (видео) зарегистрирован, CSV-колонок: ` +
+          `${cols.length} [${cols.join(", ")}]. ` +
+          `<a href="#" data-k="${key}" class="sample-link">📄 пример CSV</a>`;
+        msg.querySelector(".sample-link").onclick = e => {
+          e.preventDefault(); downloadSample(key);
+        };
+      } else {
+        msg.textContent = `✓ ${key} зарегистрирован: ` +
+          `KSampler=${mapping.ksampler?.node}, ` +
+          `pos=${mapping.positive_prompt?.node}, ` +
+          `neg=${mapping.negative_prompt?.node}, ` +
+          `image=${mapping.load_images?.main?.node}, ` +
+          `save=[${(mapping.save_images||[]).join(",")}], ` +
+          `lora=[${(mapping.lora_loaders||[]).map(l=>l.node).join(",")||"—"}]`;
+      }
       // refresh the YAML editor below so the user sees the change
       load();
       loadWorkflows();
@@ -235,6 +248,79 @@ async function loadWorkflows() {
       r.ok ? "✓ удалено" : "ошибка: " + await r.text();
     loadWorkflows();
   });
+}
+
+async function downloadSample(key) {
+  const r = await fetch("/api/workflows/" + encodeURIComponent(key) + "/sample_csv",
+                        { headers: auth });
+  if (!r.ok) { alert("не получилось: " + await r.text()); return; }
+  const blob = await r.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = key + "_sample.csv";
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+}
+
+async function configureWf(name) {
+  const panel = document.querySelector("#wf-panel");
+  panel.innerHTML = "анализирую…";
+  const d = await fetch("/api/workflows/" + encodeURIComponent(name) + "/detect",
+                        { headers: auth }).then(r => r.json()).catch(() => null);
+  if (!d) { panel.innerHTML = "ошибка детекта"; return; }
+  if (!d.is_video) {
+    panel.innerHTML = `<div class="muted">«${name}» — это картиночный флоу. ` +
+      `Жми <b>Register</b>, маппинг определится автоматически.</div>`;
+    return;
+  }
+  const rows = d.video_fields.map(f => `
+    <label class="vf-row" style="display:flex;gap:8px;align-items:center;margin:3px 0;">
+      <input type="checkbox" data-key="${f.key}" ${f.detected ? "checked" : ""}>
+      <b style="min-width:160px">${f.label}</b>
+      <span class="muted" style="min-width:90px">CSV: <code>${f.key}</code></span>
+      нода <input data-node="${f.key}" value="${esc(f.node)}" size="5"
+                 style="width:60px">
+      <small class="muted">${esc(f.title)}</small>
+    </label>`).join("");
+  panel.innerHTML = `
+    <div class="card" style="margin-top:10px;padding:12px;border:1px solid #444;border-radius:8px;">
+      <h3 style="margin:0 0 6px">⚙ ${name} — какие ноды править из CSV</h3>
+      <p class="muted" style="margin:0 0 8px">Отметь поля, которые будешь задавать в CSV.
+         Снятые галочки = нода держит своё значение из шаблона. Номер ноды можно поправить.</p>
+      <div id="vf-list">${rows}</div>
+      <div class="actions" style="margin-top:10px">
+        <button id="vf-save">💾 Зарегистрировать выбранные</button>
+        <button class="ghost" id="vf-sample">📄 Скачать пример CSV</button>
+        <button class="ghost" id="vf-close">Закрыть</button>
+        <span id="vf-msg" class="muted"></span>
+      </div>
+    </div>`;
+
+  const collect = () => {
+    const vf = {};
+    panel.querySelectorAll("#vf-list .vf-row").forEach(row => {
+      const cb = row.querySelector("input[type=checkbox]");
+      const key = cb.dataset.key;
+      const node = row.querySelector(`[data-node="${key}"]`).value.trim();
+      if (cb.checked && node) vf[key] = { node };
+    });
+    return vf;
+  };
+  const doRegister = async () => {
+    const key = d.key;
+    const r = await fetch("/api/workflows/" + encodeURIComponent(name) + "/register",
+      { method: "POST", headers: { "Content-Type": "application/json", ...auth },
+        body: JSON.stringify({ key, video_fields: collect() }) });
+    panel.querySelector("#vf-msg").textContent =
+      r.ok ? "✓ сохранено" : "ошибка: " + await r.text();
+    if (r.ok) { load(); loadWorkflows(); }
+    return r.ok;
+  };
+  panel.querySelector("#vf-save").onclick = doRegister;
+  panel.querySelector("#vf-sample").onclick = async () => {
+    if (await doRegister()) downloadSample(d.key);
+  };
+  panel.querySelector("#vf-close").onclick = () => { panel.innerHTML = ""; };
 }
 
 const wfDrop = document.querySelector("#wf-drop");

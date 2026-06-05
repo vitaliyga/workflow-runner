@@ -135,41 +135,36 @@ python main.py
 - несколько фото для одной строки указываются в `input_images` через
   `|`, например `alice_1.png | alice_2.png`.
 
-В `Видео`:
+### Видео-флоу регистрируются как картиночные
 
-- выбираешь workflow для видео;
-- загружаешь `jobs.csv` и входные фото;
+Видео работает по той же схеме, что и фото: **загрузил → зарегистрировал →
+имя флоу пишешь в CSV**. Никаких зашитых ID нод.
+
+1. **Settings → загрузить workflow JSON** (API-формат). Файл попадёт в `jobs/`.
+2. У файла нажми **⚙ CSV-поля**. Раннер сам распознаёт видео-флоу и показывает
+   список известных полей (промт, фото, длина/ширина/высота, sigmas, cfg,
+   громкость, checkpoint, diffusion model, lora). Распознавание идёт по
+   заголовкам нод (`_meta.title`), затем по `class_type`.
+3. **Отметь галочками** только те поля, которые хочешь задавать из CSV.
+   Снятые поля держат своё значение из шаблона. Номер ноды при желании правится.
+4. **💾 Зарегистрировать выбранные** — маппинг сохраняется в
+   `storage/config.yaml` под ключом = имя файла.
+5. **📄 Скачать пример CSV** — готовый шаблон ровно с выбранными колонками
+   (плюс `workflow,scenario,girl`), заполненный текущими значениями из графа.
+
+Дальше в `Видео`:
+
+- загружаешь свой `jobs.csv` и входные фото;
+- в колонке **`workflow` указываешь имя зарегистрированного флоу** — раннер
+  возьмёт именно его шаблон (можно мешать разные флоу в одном CSV);
 - запускаешь прогон как отдельный тип задач, история не смешивается с image-run.
 
-Чтобы runner подхватил поля видео, в `workflows.yaml` для этого workflow
-добавь `extra_inputs` с мэппингом на нужные узлы. Пример:
+> Поля, которых нет в CSV (или с пустым значением), не трогаются — нода
+> сохраняет дефолт из шаблона. Если ключ из колонки `workflow` не
+> зарегистрирован, прогон не стартует с понятной ошибкой.
 
-```yaml
-workflows:
-  video_ltx_v1:
-    template: "jobs/video_ltx_v1.json"
-    extra_inputs:
-      main_lora_on: { node: "6", field: "lora_16.on", cast: bool }
-      main_lora_name: { node: "6", field: "lora_16.lora" }
-      main_lora_strength: { node: "6", field: "lora_16.strength", cast: float }
-      distilled_lora_on: { node: "7", field: "lora_2.on", cast: bool }
-      distilled_lora_name: { node: "7", field: "lora_2.lora" }
-      distilled_lora_strength: { node: "7", field: "lora_2.strength", cast: float }
-      video_length_seconds: { node: "18", field: "Xi", cast: int }
-      video_width: { node: "19", field: "Xi", cast: int }
-      video_height: { node: "181", field: "Xi", cast: int }
-      seed: { node: "125", field: "seed", cast: int }
-      sigmas_first_pass: { node: "225", field: "sigmas" }
-      sigmas_final_pass: { node: "226", field: "sigmas" }
-      prompt_positive: { node: "28", field: "text" }
-      prompt_negative: { node: "29", field: "text" }
-      cfg_first_pass: { node: "245", field: "cfg", cast: float }
-      cfg_final_pass: { node: "255", field: "cfg", cast: float }
-      audio_volume_first_pass: { node: "249", field: "volume", cast: float }
-      audio_volume_final_pass: { node: "251", field: "volume", cast: float }
-      load_checkpoint: { node: "1", field: "ckpt_name" }
-      load_diffusion_model: { node: "186", field: "unet_name" }
-```
+Тонкая настройка маппинга доступна и через YAML на Settings
+(`workflows.<key>.video_fields`), но обычно хватает кнопки **⚙ CSV-поля**.
 
 ### 7. Проверка запуска
 
