@@ -52,7 +52,15 @@ from workflow_builder import (
     build_workflow,
 )
 from video_csv_loader import load_video_jobs, SAMPLE_CSV, VideoJob
-from video_workflow_builder import VideoJobParams, build_video_workflow, load_video_template
+from video_workflow_builder import (
+    build_video_workflow,
+    load_video_template,
+    detect_video_mapping,
+    default_video_mapping,
+    is_video_workflow,
+    sample_csv_for,
+    VIDEO_FIELD_CATALOG,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -685,11 +693,60 @@ def _autodetect_mapping(wf: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _video_field_candidates(wf: dict[str, Any]) -> list[dict[str, Any]]:
+    """Detected video field -> node, enriched with label/title/current value
+    so the UI can render an editable checklist."""
+    mapping = detect_video_mapping(wf)
+    out: list[dict[str, Any]] = []
+    for spec in VIDEO_FIELD_CATALOG:
+        ref = mapping.get(spec["key"])
+        node = wf.get(str(ref["node"])) if ref else None
+        title = ""
+        if isinstance(node, dict):
+            meta = node.get("_meta") or {}
+            title = str(meta.get("title") or node.get("class_type") or "")
+        out.append({
+            "key": spec["key"],
+            "label": spec["label"],
+            "node": ref["node"] if ref else "",
+            "field": (ref or {}).get("field", spec["field"]),
+            "title": title,
+            "detected": ref is not None,
+        })
+    return out
+
+
+@app.get("/api/workflows/{name}/detect", dependencies=[Depends(auth_dep)])
+async def detect_workflow(name: str) -> dict[str, Any]:
+    """Inspect an uploaded JSON: is it a video flow, and which nodes drive
+    each known field. Drives the 'select CSV columns' UI."""
+    safe = Path(name).name
+    target = ROOT / "jobs" / safe
+    if not target.exists():
+        raise HTTPException(404, f"{safe} not found")
+    try:
+        wf = json.loads(target.read_text())
+    except json.JSONDecodeError as e:
+        raise HTTPException(400, f"invalid JSON: {e}")
+    video = is_video_workflow(wf)
+    return {
+        "name": safe,
+        "key": Path(safe).stem,
+        "is_video": video,
+        "video_fields": _video_field_candidates(wf) if video else [],
+    }
+
+
 @app.post("/api/workflows/{name}/register", dependencies=[Depends(auth_dep)])
 async def register_workflow(name: str, body: dict[str, Any] = None) -> dict[str, Any]:
-    """Auto-detect node mapping and add (or replace) an entry under
-    workflows.workflows. The key defaults to the filename stem; an override
-    can be passed as {"key": "...", "overrides": {...}}."""
+    """Register a workflow under workflows.workflows. Key defaults to the
+    filename stem.
+
+    Image flows: auto-detect KSampler/prompt/image/lora mapping.
+    Video flows: store a `video_fields` mapping {field_key: {node, field}}.
+      The frontend may pass the selected subset as body["video_fields"];
+      otherwise all auto-detected fields are used.
+    """
     safe = Path(name).name
     target = ROOT / "jobs" / safe
     if not target.exists():
@@ -701,18 +758,67 @@ async def register_workflow(name: str, body: dict[str, Any] = None) -> dict[str,
 
     body = body or {}
     key = body.get("key") or Path(safe).stem
-    detected = _autodetect_mapping(wf)
-    detected["template"] = f"jobs/{safe}"
-    # Allow per-call overrides (frontend uses this for the Configure modal)
-    for k, v in (body.get("overrides") or {}).items():
-        detected[k] = v
+
+    if body.get("video_fields") is not None or is_video_workflow(wf):
+        # ---- video flow ----
+        selected = body.get("video_fields")
+        if selected:
+            # normalize: {key: {node, field}} or {key: node_id}
+            video_fields: dict[str, Any] = {}
+            for fk, ref in selected.items():
+                if isinstance(ref, dict):
+                    video_fields[fk] = {"node": str(ref.get("node")),
+                                        "field": ref.get("field")}
+                else:
+                    video_fields[fk] = {"node": str(ref)}
+        else:
+            video_fields = detect_video_mapping(wf)
+        entry = {
+            "template": f"jobs/{safe}",
+            "is_video": True,
+            "video_fields": video_fields,
+        }
+        for k, v in (body.get("overrides") or {}).items():
+            entry[k] = v
+        mapping = entry
+    else:
+        # ---- image flow (unchanged) ----
+        mapping = _autodetect_mapping(wf)
+        mapping["template"] = f"jobs/{safe}"
+        for k, v in (body.get("overrides") or {}).items():
+            mapping[k] = v
 
     cfg = load_config()
     wfs = cfg.setdefault("workflows", {}).setdefault("workflows", {}) or {}
-    wfs[key] = detected
+    wfs[key] = mapping
     cfg["workflows"]["workflows"] = wfs
     save_config(cfg)
-    return {"ok": True, "key": key, "mapping": detected}
+    return {"ok": True, "key": key, "mapping": mapping}
+
+
+@app.get("/api/workflows/{name}/sample_csv", dependencies=[Depends(auth_dep)])
+async def workflow_sample_csv(name: str) -> StreamingResponse:
+    """Return a one-row sample CSV for a registered video flow, with exactly
+    the mapped columns pre-filled from the template's current values."""
+    key = Path(name).name
+    if key.endswith(".json"):
+        key = key[:-5]
+    cfg = load_config()
+    registered = (cfg.get("workflows") or {}).get("workflows") or {}
+    spec = registered.get(key)
+    if not spec or not spec.get("is_video"):
+        raise HTTPException(404, f"video flow '{key}' not registered")
+    tmpl_path = _resolve_workflow_template_path(str(spec.get("template") or ""))
+    if not tmpl_path.exists():
+        raise HTTPException(404, f"template missing: {tmpl_path.name}")
+    template = json.loads(tmpl_path.read_text())
+    mapping = spec.get("video_fields") or default_video_mapping(template)
+    csv_text = sample_csv_for(template, mapping, key)
+    return StreamingResponse(
+        iter([csv_text]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{key}_sample.csv"'},
+    )
 
 
 @app.delete("/api/workflows/{name}", dependencies=[Depends(auth_dep)])
@@ -1095,7 +1201,42 @@ async def cancel_run(run_id: str) -> dict[str, Any]:
 
 # ---- video runs (LTX-specific, direct node patching) -------------------
 
+# Legacy fallback template, used only when a CSV row's `workflow` key is not
+# a registered video flow (keeps older single-template setups working).
 VIDEO_WORKFLOW_TEMPLATE_PATH = ROOT / "video_workflow.json"
+
+
+def _resolve_video_flows(cfg: dict[str, Any], jobs: list[VideoJob]) -> dict[str, tuple[dict, dict]]:
+    """For each distinct `workflow` key used by the jobs, resolve
+    (template, mapping). Registered video flows win; otherwise fall back to
+    the legacy single template. Raises HTTPException listing unresolved keys.
+    """
+    registered = (cfg.get("workflows") or {}).get("workflows") or {}
+    flows: dict[str, tuple[dict, dict]] = {}
+    unresolved: list[str] = []
+    for key in {(j.workflow or "").strip() for j in jobs}:
+        spec = registered.get(key)
+        if spec and spec.get("template"):
+            tmpl_path = _resolve_workflow_template_path(str(spec["template"]))
+            if tmpl_path.exists():
+                template = json.loads(tmpl_path.read_text())
+                mapping = spec.get("video_fields") or default_video_mapping(template)
+                flows[key] = (template, mapping)
+                continue
+        # fallback to legacy template
+        if VIDEO_WORKFLOW_TEMPLATE_PATH.exists():
+            template = load_video_template(VIDEO_WORKFLOW_TEMPLATE_PATH)
+            flows[key] = (template, default_video_mapping(template))
+            continue
+        unresolved.append(key)
+    if unresolved:
+        raise HTTPException(
+            400,
+            "не зарегистрированы видео-флоу для CSV-колонки workflow: "
+            + ", ".join(sorted(unresolved))
+            + ". Загрузите и зарегистрируйте их в Settings.",
+        )
+    return flows
 
 
 @app.post("/api/video-runs", dependencies=[Depends(auth_dep)])
@@ -1167,9 +1308,6 @@ async def start_video_run(run_id: str) -> dict[str, Any]:
     if missing:
         raise HTTPException(400, f"missing input photos: {missing}")
 
-    if not VIDEO_WORKFLOW_TEMPLATE_PATH.exists():
-        raise HTTPException(500, f"video workflow template not found: {VIDEO_WORKFLOW_TEMPLATE_PATH.name}")
-
     cfg = load_config()
     pod_cfgs = [
         PodConfig(name=p["name"], url=p["url"],
@@ -1180,6 +1318,10 @@ async def start_video_run(run_id: str) -> dict[str, Any]:
     if not pod_cfgs:
         raise HTTPException(400, "no pods configured (see /settings)")
 
+    video_jobs = load_video_jobs(state.dir / "jobs.csv")
+    # Resolve template + mapping per workflow key (raises if any unregistered).
+    flows = _resolve_video_flows(cfg, video_jobs)
+
     s3 = _s3_from_config(cfg.get("s3") or {})
 
     state.started_at = time.time()
@@ -1187,8 +1329,7 @@ async def start_video_run(run_id: str) -> dict[str, Any]:
     state.cancelled = False
     await state.emit("run_started")
 
-    video_jobs = load_video_jobs(state.dir / "jobs.csv")
-    asyncio.create_task(_run_video_pool(state, pod_cfgs, video_jobs, s3))
+    asyncio.create_task(_run_video_pool(state, pod_cfgs, video_jobs, flows, s3))
     return {"ok": True}
 
 
@@ -1196,13 +1337,13 @@ async def _run_video_pool(
     state: RunState,
     pod_cfgs: list[PodConfig],
     jobs: list[VideoJob],
+    flows: dict[str, tuple[dict, dict]],
     s3: Any,
 ) -> None:
-    """Execute video jobs using direct node patching (no WorkflowRegistry)."""
+    """Execute video jobs, each patched via its registered flow mapping."""
     import aiohttp
     from pod_client import PodClient, PodError
 
-    template = load_video_template(VIDEO_WORKFLOW_TEMPLATE_PATH)
     queue: asyncio.Queue = asyncio.Queue()
     for i, j in enumerate(jobs):
         await queue.put((i, j))
@@ -1215,7 +1356,7 @@ async def _run_video_pool(
                 client = PodClient(pod_cfg, session)
                 for slot in range(pod_cfg.max_parallel):
                     workers.append(asyncio.create_task(
-                        _video_worker(state, client, queue, template, s3),
+                        _video_worker(state, client, queue, flows, s3),
                         name=f"{pod_cfg.name}#{slot}",
                     ))
             # poison pills
@@ -1233,7 +1374,7 @@ async def _video_worker(
     state: RunState,
     client: Any,
     queue: asyncio.Queue,
-    template: dict[str, Any],
+    flows: dict[str, tuple[dict, dict]],
     s3: Any,
     max_attempts: int = 3,
 ) -> None:
@@ -1248,7 +1389,7 @@ async def _video_worker(
         attempts = 0
         while attempts < max_attempts:
             try:
-                await _video_handle(state, client, idx, job, template, s3)
+                await _video_handle(state, client, idx, job, flows, s3)
                 break
             except Exception as e:
                 attempts += 1
@@ -1265,11 +1406,13 @@ async def _video_handle(
     client: Any,
     idx: int,
     job: VideoJob,
-    template: dict[str, Any],
+    flows: dict[str, tuple[dict, dict]],
     s3: Any,
 ) -> None:
     """Submit one video job and download outputs."""
     await _video_set_status(state, idx, "running", pod=client.cfg.name, error=None)
+
+    template, mapping = flows[(job.workflow or "").strip()]
 
     # Upload input image
     remote_image = ""
@@ -1282,28 +1425,29 @@ async def _video_handle(
     day_tag = _run_day_tag(state.run_id)
     prefix = f"video/{day_tag}/{job.scenario or 'run'}/{idx:05d}_seed{job.seed}"
 
-    params = VideoJobParams(
-        input_image=remote_image,
-        prompt_positive=job.prompt_positive,
-        prompt_negative=job.prompt_negative,
-        seed=job.seed,
-        video_length_seconds=job.video_length_seconds,
-        video_width=job.video_width,
-        video_height=job.video_height,
-        sigmas_first_pass=job.sigmas_first_pass,
-        sigmas_final_pass=job.sigmas_final_pass,
-        cfg_first_pass=job.cfg_first_pass,
-        cfg_final_pass=job.cfg_final_pass,
-        audio_volume_first_pass=job.audio_volume_first,
-        audio_volume_final_pass=job.audio_volume_final,
-        checkpoint_name=job.checkpoint_name,
-        diffusion_model_name=job.diffusion_model_name,
-        load_loras_json=job.load_loras_json,
-        load_distilled_lora_json=job.load_distilled_lora_json,
-        save_prefix=prefix,
-        extra=job.extra,
-    )
-    wf = build_video_workflow(template, params)
+    # CSV row -> field-key values. Only fields present in the flow's mapping
+    # are patched; everything else keeps the template default.
+    values = {
+        "input_image": remote_image,
+        "prompt_positive": job.prompt_positive,
+        "prompt_negative": job.prompt_negative,
+        "seed": job.seed,
+        "video_length_seconds": job.video_length_seconds,
+        "video_width": job.video_width,
+        "video_height": job.video_height,
+        "sigmas_first_pass": job.sigmas_first_pass,
+        "sigmas_final_pass": job.sigmas_final_pass,
+        "cfg_first_pass": job.cfg_first_pass,
+        "cfg_final_pass": job.cfg_final_pass,
+        "audio_volume_first": job.audio_volume_first,
+        "audio_volume_final": job.audio_volume_final,
+        "checkpoint_name": job.checkpoint_name,
+        "diffusion_model_name": job.diffusion_model_name,
+        "load_loras_json": job.load_loras_json,
+        "load_distilled_lora_json": job.load_distilled_lora_json,
+    }
+    wf = build_video_workflow(template, values, mapping,
+                              save_prefix=prefix, extra=job.extra)
 
     log.info("[%s] submit video job %d girl=%s seed=%d",
              client.cfg.name, idx, job.girl, job.seed)
@@ -1314,8 +1458,11 @@ async def _video_handle(
     out_dir = state.dir / "outputs" / f"{idx:05d}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Node 61 is VHS_VideoCombine — it's the save node
-    save_nodes = {"61"}
+    # Save node = VHS_VideoCombine (detect its id from the template).
+    save_nodes = {
+        nid for nid, n in template.items()
+        if isinstance(n, dict) and n.get("class_type") == "VHS_VideoCombine"
+    } or {"61"}
     outputs = client.outputs_from_history(entry, save_nodes)
     if not outputs:
         # Fallback: grab all outputs
