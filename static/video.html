@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Видео прогон — Workflow Runner</title>
+<meta name="description" content="Запуск LTX Video генерации через ComfyUI с CSV-параметрами" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="/static/app.css?v=2" />
+<style>
+  :root {
+    --vid-accent: #a855f7;
+    --vid-accent-glow: rgba(168, 85, 247, 0.3);
+    --vid-accent-dark: #7c3aed;
+    --vid-surface: rgba(168, 85, 247, 0.06);
+  }
+
+  /* Video-specific overrides */
+  header { background: linear-gradient(135deg, #0f0a1e 0%, #1a0a2e 50%, #0d0d1a 100%); }
+  header h1::before { content: "🎬 "; }
+  nav a.active { color: var(--vid-accent); border-bottom-color: var(--vid-accent); }
+
+  .csv-info-box {
+    background: var(--vid-surface);
+    border: 1px solid rgba(168, 85, 247, 0.2);
+    border-radius: 12px;
+    padding: 16px 20px;
+    margin-top: 16px;
+  }
+  .csv-info-box h4 {
+    margin: 0 0 10px;
+    color: var(--vid-accent);
+    font-size: 0.85rem;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+  .csv-info-box .cols-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 4px 16px;
+  }
+  .csv-info-box .col-item {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    padding: 2px 0;
+  }
+  .csv-info-box .col-item code {
+    font-family: monospace;
+    color: #c4b5fd;
+    background: rgba(168, 85, 247, 0.1);
+    padding: 1px 4px;
+    border-radius: 3px;
+    font-size: 0.75rem;
+  }
+  .csv-info-box .col-item small {
+    color: #6b7280;
+    font-size: 0.7rem;
+    display: block;
+  }
+
+  .download-sample {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 14px;
+    background: rgba(168, 85, 247, 0.12);
+    border: 1px solid rgba(168, 85, 247, 0.3);
+    border-radius: 8px;
+    color: #c4b5fd;
+    font-size: 0.82rem;
+    font-weight: 500;
+    text-decoration: none;
+    transition: all 0.2s;
+    margin-top: 12px;
+    cursor: pointer;
+  }
+  .download-sample:hover {
+    background: rgba(168, 85, 247, 0.2);
+    border-color: var(--vid-accent);
+    color: #e9d5ff;
+    transform: translateY(-1px);
+  }
+
+  #btn-create {
+    background: linear-gradient(135deg, var(--vid-accent-dark), var(--vid-accent));
+    box-shadow: 0 4px 15px var(--vid-accent-glow);
+  }
+  #btn-create:hover:not(:disabled) {
+    box-shadow: 0 6px 25px var(--vid-accent-glow);
+  }
+  #btn-start {
+    background: linear-gradient(135deg, #059669, #10b981);
+    box-shadow: 0 4px 15px rgba(16, 185, 129, 0.3);
+  }
+
+  /* Video job table */
+  #jobs thead th {
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #9ca3af;
+    border-bottom: 1px solid rgba(168, 85, 247, 0.2);
+  }
+  .video-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    background: rgba(168, 85, 247, 0.15);
+    border: 1px solid rgba(168, 85, 247, 0.3);
+    border-radius: 12px;
+    font-size: 0.7rem;
+    color: #c4b5fd;
+    font-weight: 500;
+    white-space: nowrap;
+  }
+
+  /* History section */
+  #history h2::before { content: "📺 "; }
+
+  .video-file-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 8px;
+    background: rgba(168, 85, 247, 0.1);
+    border: 1px solid rgba(168, 85, 247, 0.25);
+    border-radius: 6px;
+    color: #c4b5fd;
+    text-decoration: none;
+    font-size: 0.75rem;
+    transition: all 0.2s;
+  }
+  .video-file-link:hover {
+    background: rgba(168, 85, 247, 0.2);
+    color: #e9d5ff;
+  }
+  .video-file-link::before { content: "▶ "; }
+
+  /* No photos zone message */
+  .no-photos-note {
+    font-size: 0.8rem;
+    color: #6b7280;
+    font-style: italic;
+    margin-top: 8px;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Workflow Runner</h1>
+  <nav>
+    <a href="/">Прогон</a>
+    <a href="/scenarios">Сценарии</a>
+    <a href="/video" class="active">Видео</a>
+    <a href="/settings">Настройки</a>
+  </nav>
+</header>
+
+<main>
+  <section id="upload" class="card">
+    <h2>1. Загрузить CSV для видео</h2>
+
+    <div class="csv-info-box">
+      <h4>Колонки CSV (ноды LTX 2.3)</h4>
+      <div class="cols-grid">
+        <div class="col-item"><code>input_image</code><small>Нода 15 — имя файла фото</small></div>
+        <div class="col-item"><code>load_loras_json</code><small>Нода 6 — JSON лоры (Power Lora Loader)</small></div>
+        <div class="col-item"><code>load_distilled_lora_json</code><small>Нода 7 — JSON distilled лоры</small></div>
+        <div class="col-item"><code>video_length_seconds</code><small>Нода 18 — длина видео</small></div>
+        <div class="col-item"><code>video_width</code><small>Нода 19 — ширина (px)</small></div>
+        <div class="col-item"><code>video_height</code><small>Нода 181 — высота (px)</small></div>
+        <div class="col-item"><code>seed</code><small>Нода 125 — сид</small></div>
+        <div class="col-item"><code>sigmas_first_pass</code><small>Нода 225 — ManualSigmas</small></div>
+        <div class="col-item"><code>sigmas_final_pass</code><small>Нода 226 — ManualSigmas</small></div>
+        <div class="col-item"><code>prompt_positive</code><small>Нода 28 — позитив</small></div>
+        <div class="col-item"><code>prompt_negative</code><small>Нода 29 — негатив</small></div>
+        <div class="col-item"><code>cfg_first_pass</code><small>Нода 245 — CFGGuider</small></div>
+        <div class="col-item"><code>cfg_final_pass</code><small>Нода 255 — CFGGuider</small></div>
+        <div class="col-item"><code>audio_volume_first</code><small>Нода 249 — AudioAdjustVolume</small></div>
+        <div class="col-item"><code>audio_volume_final</code><small>Нода 251 — AudioAdjustVolume</small></div>
+        <div class="col-item"><code>checkpoint_name</code><small>Нода 1 — Load Checkpoint</small></div>
+        <div class="col-item"><code>diffusion_model_name</code><small>Нода 186 — Load Diffusion Model</small></div>
+        <div class="col-item"><code>girl</code><small>Метка / имя</small></div>
+        <div class="col-item"><code>scenario</code><small>Группа / сцена</small></div>
+      </div>
+      <a class="download-sample" href="/api/video-runs/sample-csv" id="btn-sample-csv">
+        ⬇ Скачать пример CSV
+      </a>
+    </div>
+
+    <div class="row" style="margin-top:20px">
+      <label class="drop" id="csv-drop">
+        <input type="file" id="csv-input" accept=".csv,text/csv" hidden />
+        <div class="drop-body">
+          <strong>video_jobs.csv</strong>
+          <small>перетащи сюда CSV или нажми</small>
+          <em id="csv-name"></em>
+        </div>
+      </label>
+
+      <label class="drop" id="photos-drop">
+        <input type="file" id="photos-input" multiple
+               accept="image/png,image/jpeg,image/webp" hidden />
+        <div class="drop-body">
+          <strong>входные фото (опционально)</strong>
+          <small>имена должны совпадать с input_image в CSV</small>
+          <em id="photos-name"></em>
+        </div>
+      </label>
+    </div>
+
+    <div class="actions">
+      <button id="btn-create" disabled>🎬 Создать видео прогон</button>
+      <span id="create-msg" class="muted"></span>
+    </div>
+  </section>
+
+  <section id="run" class="card hidden">
+    <h2>2. Прогресс <small id="run-id" class="muted"></small></h2>
+    <div id="hint" class="hint hidden"></div>
+    <div id="counts" class="counts"></div>
+    <div class="actions">
+      <button id="btn-start">▶ Запустить генерацию</button>
+      <button id="btn-cancel" class="ghost">Отменить</button>
+      <span id="start-msg" class="muted"></span>
+    </div>
+    <table id="jobs">
+      <thead><tr>
+        <th>#</th>
+        <th>Girl / Subject</th>
+        <th>Позитивный промт</th>
+        <th>Seed</th>
+        <th>Размер</th>
+        <th>Длина</th>
+        <th>Статус</th>
+        <th>Файлы</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section id="history" class="card">
+    <h2>Видео прогоны</h2>
+    <div id="archive-msg" class="muted"></div>
+    <table id="history-table">
+      <thead><tr>
+        <th>ID</th><th>Заданий</th><th>OK</th><th>Ошибок</th>
+        <th>Начат</th><th>Действия</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+</main>
+
+<script src="/static/video.js"></script>
+</body>
+</html>

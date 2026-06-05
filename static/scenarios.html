@@ -1,0 +1,534 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<title>Сценарии — Workflow Runner</title>
+<link rel="stylesheet" href="/static/app.css?v=2" />
+<style>
+  .meta-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 12px;
+  }
+  .field { display: grid; gap: 4px; min-width: 0; }
+  .field label { color: #888; font-size: 12px; }
+  .field input {
+    width: 180px;
+    max-width: 100%;
+    min-width: 0;
+    justify-self: start;
+    background: #0d1117;
+    color: #ddd;
+    border: 1px solid #1d2230;
+    border-radius: 4px;
+    padding: 8px 10px;
+    font: 13px ui-monospace, Menlo, monospace;
+  }
+  .field select {
+    width: 180px;
+    max-width: 100%;
+    min-width: 0;
+    justify-self: start;
+    background: #0d1117;
+    color: #ddd;
+    border: 1px solid #1d2230;
+    border-radius: 4px;
+    padding: 8px 10px;
+    font: 13px ui-monospace, Menlo, monospace;
+  }
+  .field input[readonly] { color: #9cf; }
+  .table-wrap { overflow: auto; border: 1px solid #1d2230; border-radius: 6px; }
+  .builder-table { margin-top: 0; min-width: 1100px; }
+  .builder-table th, .builder-table td { vertical-align: top; }
+  .builder-table input {
+    width: 100%;
+    background: #0d1117;
+    color: #ddd;
+    border: 1px solid #1d2230;
+    border-radius: 4px;
+    padding: 7px 8px;
+    font: 12px ui-monospace, Menlo, monospace;
+  }
+  .builder-table input.small { width: 92px; }
+  .builder-table td.actions-cell { white-space: nowrap; }
+  .builder-table td.actions-cell button { padding: 6px 10px; margin-right: 6px; }
+  pre {
+    width: 800px;
+    max-width: 100%;
+    min-width: 0;
+    background: #0d1117;
+    padding: 12px;
+    border-radius: 4px;
+    overflow: auto;
+    font: 11px ui-monospace, Menlo, monospace;
+    color: #9cf;
+    max-height: 480px;
+    white-space: pre;
+    box-sizing: border-box;
+  }
+  .summary {
+    display: flex; gap: 14px; flex-wrap: wrap;
+    color: #888; font-size: 12px; margin-top: 8px;
+  }
+  .summary b { color: #ddd; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Workflow Runner</h1>
+  <nav>
+    <a href="/">Прогон</a>
+    <a href="/scenarios" class="active">Сценарии</a>
+    <a href="/video">Видео</a>
+    <a href="/settings">Настройки</a>
+  </nav>
+</header>
+
+<main>
+  <section class="card">
+    <h2>Builder сценариев</h2>
+    <p class="muted">Выбираешь workflow, он подставляет модель и параметры по умолчанию. Дальше правишь только строки таблицы и скачиваешь `jobs.csv`.</p>
+
+    <div class="meta-grid">
+      <div class="field">
+        <label>Workflow</label>
+        <select id="workflow"></select>
+      </div>
+      <div class="field">
+        <label>Scenario</label>
+        <input id="scenario" value="1.3" />
+      </div>
+      <div class="field">
+        <label>Model</label>
+        <input id="lora_name" />
+      </div>
+      <div class="field">
+        <label>Strengths</label>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+          <input id="lora_strength_model" type="number" step="0.1" />
+          <input id="lora_strength_clip" type="number" step="0.1" />
+        </div>
+      </div>
+      <div class="field">
+        <label>Seed</label>
+        <input id="seed" type="number" step="1" />
+      </div>
+      <div class="field">
+        <label>Steps</label>
+        <input id="steps" type="number" step="1" />
+      </div>
+      <div class="field">
+        <label>CFG</label>
+        <input id="cfg" type="number" step="0.1" />
+      </div>
+      <div class="field">
+        <label>Sampler / Scheduler</label>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+          <input id="sampler_name" />
+          <input id="scheduler" />
+        </div>
+      </div>
+      <div class="field">
+        <label>Denoise</label>
+        <input id="denoise" type="number" step="0.01" />
+      </div>
+      <div class="field">
+        <label>Control after</label>
+        <input id="control_after_generate" value="fixed" />
+      </div>
+      <div class="field">
+        <label>Prompt defaults</label>
+        <input id="prompt_hint" readonly />
+      </div>
+      <div class="field">
+        <label>Rows</label>
+        <input id="row_count" readonly />
+      </div>
+    </div>
+
+    <div class="actions">
+      <button id="add-row" class="ghost">+ строка</button>
+      <button id="reset-rows" class="ghost">↺ сбросить</button>
+      <button id="generate">Сгенерировать jobs.csv</button>
+      <button id="download" class="ghost" disabled>⬇ Скачать jobs.csv</button>
+      <button id="send-run" class="ghost" disabled>→ В прогон</button>
+      <span id="msg" class="muted"></span>
+    </div>
+
+    <div class="table-wrap">
+      <table id="rows" class="builder-table">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Subject</th>
+            <th>Input image</th>
+            <th>Prompt +</th>
+            <th>Prompt -</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Preview</h2>
+    <pre id="preview"></pre>
+    <div class="summary" id="summary"></div>
+  </section>
+</main>
+
+<script>
+const ADMIN_TOKEN = localStorage.getItem("admin_token") || "";
+const auth = ADMIN_TOKEN ? { Authorization: "Bearer " + ADMIN_TOKEN } : {};
+const $ = (s) => document.querySelector(s);
+const $$ = (s) => document.querySelectorAll(s);
+
+const CSV_COLUMNS = [
+  "workflow",
+  "scenario",
+  "girl",
+  "lora_name",
+  "lora_strength_model",
+  "lora_strength_clip",
+  "prompt_positive",
+  "prompt_negative",
+  "input_image",
+  "input_images",
+  "seed",
+  "control_after_generate",
+  "steps",
+  "cfg",
+  "sampler_name",
+  "scheduler",
+  "denoise",
+];
+
+const state = {
+  workflows: {},
+  current: null,
+  lastCsv: "",
+  previewError: "",
+};
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g,
+    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+function csvEscape(v) {
+  const s = String(v ?? "");
+  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+function splitImages(value) {
+  return String(value ?? "")
+    .split(/[|\n;]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function incrementTrailingNumber(value, delta) {
+  const s = String(value ?? "");
+  const m = s.match(/^(.*?)(\d+)(\.[^./\\]+)?$/);
+  if (m) {
+    const next = String(Number(m[2]) + delta).padStart(m[2].length, "0");
+    return `${m[1]}${next}${m[3] || ""}`;
+  }
+  const m2 = s.match(/^(.*?)(\d+)$/);
+  if (m2) {
+    const next = String(Number(m2[2]) + delta).padStart(m2[2].length, "0");
+    return `${m2[1]}${next}`;
+  }
+  return delta === 0 ? s : `${s}_${delta}`;
+}
+
+function incrementImagesList(value, delta) {
+  return splitImages(value)
+    .map((img) => incrementTrailingNumber(img, delta))
+    .join(" | ");
+}
+
+function rowDataFromInputs(tr) {
+  return {
+    girl: tr.querySelector('[data-k="girl"]').value.trim(),
+    input_images: tr.querySelector('[data-k="input_images"]').value.trim(),
+    prompt_positive: tr.querySelector('[data-k="prompt_positive"]').value.trim(),
+    prompt_negative: tr.querySelector('[data-k="prompt_negative"]').value.trim(),
+  };
+}
+
+function updateRowCount() {
+  $("#row_count").value = String($$("#rows tbody tr").length);
+}
+
+function rowHtml(data, idx) {
+  return `
+    <tr>
+      <td>${idx}</td>
+      <td><input data-k="girl" value="${esc(data.girl || "")}" placeholder="subject_1" /></td>
+      <td><input data-k="input_images" value="${esc(data.input_images || "")}" placeholder="subject_1.png | subject_1_ref2.png" /></td>
+      <td><input data-k="prompt_positive" value="${esc(data.prompt_positive || "")}" placeholder="positive prompt" /></td>
+      <td><input data-k="prompt_negative" value="${esc(data.prompt_negative || "")}" placeholder="negative prompt" /></td>
+      <td class="actions-cell">
+        <button class="ghost" data-act="dup" type="button">⎘</button>
+        <button class="ghost" data-act="plus10" type="button">+10</button>
+        <button class="ghost" data-act="del" type="button">×</button>
+      </td>
+    </tr>`;
+}
+
+function addRow(data = {}) {
+  const tbody = $("#rows tbody");
+  const idx = tbody.querySelectorAll("tr").length + 1;
+  tbody.insertAdjacentHTML("beforeend", rowHtml(data, idx));
+  const tr = tbody.lastElementChild;
+  tr.querySelectorAll("input").forEach((input) => {
+    input.addEventListener("input", () => {
+      updateSummary();
+      renderPreview();
+    });
+  });
+  tr.querySelector('[data-act="dup"]').addEventListener("click", () => {
+    addRow(rowDataFromInputs(tr));
+    renderPreview();
+  });
+  tr.querySelector('[data-act="plus10"]').addEventListener("click", () => {
+    const row = rowDataFromInputs(tr);
+    for (let i = 1; i <= 10; i++) {
+      addRow({
+        ...row,
+        girl: incrementTrailingNumber(row.girl, i),
+        input_images: incrementImagesList(row.input_images, i),
+      });
+    }
+    renumberRows();
+    renderPreview();
+  });
+  tr.querySelector('[data-act="del"]').addEventListener("click", () => {
+    if (tbody.querySelectorAll("tr").length <= 1) return;
+    tr.remove();
+    renumberRows();
+    renderPreview();
+  });
+  updateRowCount();
+}
+
+function renumberRows() {
+  $$("#rows tbody tr").forEach((tr, i) => tr.firstElementChild.textContent = String(i + 1));
+  updateRowCount();
+}
+
+function clearRows() {
+  $("#rows tbody").innerHTML = "";
+  const meta = currentMeta();
+  const roleCount = (meta.image_roles || []).length || 1;
+  const sampleImages = roleCount > 1
+    ? Array.from({ length: roleCount }, (_, i) => `sample_input_${i + 1}.png`).join(" | ")
+    : "sample_input.png";
+  addRow({
+    girl: "subject_1",
+    input_images: sampleImages,
+    prompt_positive: meta.prompt_defaults?.positive || "",
+    prompt_negative: meta.prompt_defaults?.negative || "",
+  });
+}
+
+function currentMeta() {
+  return state.workflows[$("#workflow").value] || {};
+}
+
+function applyWorkflowDefaults(name) {
+  const meta = state.workflows[name] || {};
+  state.current = meta;
+
+  $("#lora_name").value = meta.lora_loaders?.[0]?.lora_name || "";
+  $("#lora_strength_model").value = meta.lora_loaders?.[0]?.strength_model ?? 1;
+  $("#lora_strength_clip").value = meta.lora_loaders?.[0]?.strength_clip ?? 1;
+  $("#seed").value = meta.ksampler?.seed ?? 0;
+  $("#steps").value = meta.ksampler?.steps ?? 20;
+  $("#cfg").value = meta.ksampler?.cfg ?? 7;
+  $("#sampler_name").value = meta.ksampler?.sampler_name || "dpmpp_2m";
+  $("#scheduler").value = meta.ksampler?.scheduler || "karras";
+  $("#denoise").value = meta.ksampler?.denoise ?? 1;
+  $("#prompt_hint").value = [
+    meta.prompt_defaults?.positive || "",
+    meta.prompt_defaults?.negative || "",
+  ].filter(Boolean).join(" | ");
+
+  clearRows();
+  renderPreview();
+  updateSummary();
+}
+
+function buildRows() {
+  const meta = currentMeta();
+  const expectedImages = (meta.image_roles || []).length || 1;
+  const workflow = $("#workflow").value;
+  const scenario = $("#scenario").value.trim();
+  const lora_name = $("#lora_name").value.trim();
+  const lora_strength_model = $("#lora_strength_model").value;
+  const lora_strength_clip = $("#lora_strength_clip").value;
+  const seed = $("#seed").value;
+  const steps = $("#steps").value;
+  const cfg = $("#cfg").value;
+  const sampler_name = $("#sampler_name").value.trim();
+  const scheduler = $("#scheduler").value.trim();
+  const denoise = $("#denoise").value;
+  const control_after_generate = $("#control_after_generate").value.trim() || "fixed";
+
+  const rows = [];
+  $$("#rows tbody tr").forEach((tr) => {
+    const row = rowDataFromInputs(tr);
+    if (!row.girl && !row.input_images && !row.prompt_positive) return;
+    const images = splitImages(row.input_images);
+    if (images.length !== expectedImages) {
+      throw new Error(
+        `row "${row.girl || "?"}": expected ${expectedImages} input image(s), got ${images.length}`
+      );
+    }
+    const primary = images[0] || "";
+    rows.push({
+      workflow,
+      scenario,
+      girl: row.girl,
+      lora_name: lora_name || meta.lora_loaders?.[0]?.lora_name || "",
+      lora_strength_model,
+      lora_strength_clip,
+      prompt_positive: row.prompt_positive,
+      prompt_negative: row.prompt_negative,
+      input_image: primary,
+      input_images: row.input_images,
+      seed,
+      control_after_generate,
+      steps,
+      cfg,
+      sampler_name,
+      scheduler,
+      denoise,
+    });
+  });
+  return rows;
+}
+
+function renderPreview() {
+  let rows;
+  try {
+    rows = buildRows();
+  } catch (e) {
+    state.previewError = String(e.message || e);
+    $("#preview").textContent = "";
+    $("#summary").innerHTML = "";
+    $("#download").disabled = true;
+    $("#send-run").disabled = true;
+    state.lastCsv = "";
+    $("#msg").textContent = state.previewError;
+    return;
+  }
+  state.previewError = "";
+  $("#msg").textContent = "";
+  if (!rows.length) {
+    state.previewError = "";
+    $("#preview").textContent = "";
+    $("#summary").innerHTML = "";
+    $("#download").disabled = true;
+    $("#send-run").disabled = true;
+    state.lastCsv = "";
+    return;
+  }
+  const buf = [CSV_COLUMNS.map(csvEscape).join(",")];
+  for (const row of rows) {
+    buf.push(CSV_COLUMNS.map((k) => csvEscape(row[k])).join(","));
+  }
+  state.lastCsv = buf.join("\n") + "\n";
+  $("#preview").textContent = state.lastCsv.split("\n").slice(0, 201).join("\n");
+  $("#download").disabled = false;
+  $("#send-run").disabled = false;
+  updateSummary(rows);
+}
+
+function updateSummary(rows = buildRows()) {
+  const meta = currentMeta();
+  $("#summary").innerHTML = `
+    <span>workflow: <b>${esc($("#workflow").value || "")}</b></span>
+    <span>model: <b>${esc($("#lora_name").value || meta.lora_loaders?.[0]?.lora_name || "")}</b></span>
+    <span>rows: <b>${rows.length}</b></span>
+    <span>image roles: <b>${(meta.image_roles || []).length || 1}</b></span>`;
+}
+
+async function loadWorkflows() {
+  const data = await fetch("/api/workflows", { headers: auth }).then((r) => r.json());
+  const list = data.workflows || [];
+  state.workflows = Object.fromEntries(list.map((w) => [w.name, w]));
+  const select = $("#workflow");
+  select.innerHTML = list.map((w) => `<option value="${esc(w.name)}">${esc(w.name)}</option>`).join("");
+  const first = list[0]?.name || "";
+  if (first) {
+    select.value = first;
+    applyWorkflowDefaults(first);
+  }
+}
+
+$("#workflow").addEventListener("change", () => applyWorkflowDefaults($("#workflow").value));
+$("#scenario").addEventListener("input", renderPreview);
+["lora_name", "lora_strength_model", "lora_strength_clip", "seed", "steps", "cfg",
+ "sampler_name", "scheduler", "denoise", "control_after_generate"]
+  .forEach((id) => $("#" + id).addEventListener("input", () => {
+    updateSummary();
+    renderPreview();
+  }));
+
+$("#add-row").addEventListener("click", () => {
+  const meta = currentMeta();
+  const roleCount = (meta.image_roles || []).length || 1;
+  const sampleImages = roleCount > 1
+    ? Array.from({ length: roleCount }, (_, i) => `subject_${$$("#rows tbody tr").length + 1}_${i + 1}.png`).join(" | ")
+    : `subject_${$$("#rows tbody tr").length + 1}.png`;
+  addRow({
+    girl: `subject_${$$("#rows tbody tr").length + 1}`,
+    input_images: sampleImages,
+    prompt_positive: meta.prompt_defaults?.positive || "",
+    prompt_negative: meta.prompt_defaults?.negative || "",
+  });
+  renderPreview();
+});
+
+$("#reset-rows").addEventListener("click", () => {
+  clearRows();
+  renderPreview();
+});
+
+$("#generate").addEventListener("click", () => {
+  renderPreview();
+  if (state.previewError) {
+    $("#msg").textContent = state.previewError;
+    return;
+  }
+  $("#msg").textContent = state.lastCsv ? `сгенерировано строк: ${buildRows().length}` : "ничего не задано";
+});
+
+$("#download").addEventListener("click", () => {
+  if (!state.lastCsv) return;
+  const blob = new Blob([state.lastCsv], { type: "text/csv" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "jobs.csv";
+  a.click();
+});
+
+$("#send-run").addEventListener("click", () => {
+  if (!state.lastCsv) return;
+  sessionStorage.setItem("builder_jobs_csv", state.lastCsv);
+  sessionStorage.setItem("builder_jobs_name", "jobs.csv");
+  localStorage.setItem("builder_jobs_csv", state.lastCsv);
+  localStorage.setItem("builder_jobs_name", "jobs.csv");
+  location.href = "/";
+});
+
+loadWorkflows().catch((e) => {
+  $("#msg").textContent = "ошибка загрузки workflows: " + e;
+});
+</script>
+</body>
+</html>

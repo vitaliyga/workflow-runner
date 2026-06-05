@@ -1,0 +1,22 @@
+workflow: sample_image_v1
+scenario: "1.3"
+girl: subject_a
+input_images: [sample_input.png]
+loras:
+  - name: sample_lora.safetensors
+    strength_model: 1.0
+    strength_clip: 1.0
+ksampler:
+  seed: 12345
+  steps: 20
+  cfg: 7.0
+  sampler_name: dpmpp_2m
+  scheduler: karras
+  denoise: 1.0
+prompts:
+  - positive: "portrait, studio light"
+    negative: "blurry, lowres"
+  - positive: "portrait, neutral office"
+    negative: "blurry, lowres"
+  - positive: "portrait, simple interior"
+    negative: "blurry, lowres"

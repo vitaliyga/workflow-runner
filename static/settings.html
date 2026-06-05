@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<title>Настройки — Workflow Runner</title>
+<link rel="stylesheet" href="/static/app.css?v=2" />
+<style>
+  textarea { width: 100%; min-height: 280px; background: #0d1117; color: #ddd;
+             border: 1px solid #1d2230; border-radius: 4px; padding: 10px;
+             font: 12px ui-monospace, Menlo, monospace; }
+  .field { display: grid; gap: 4px; margin-bottom: 12px; }
+  .field label { color: #888; font-size: 12px; }
+  .field input { background: #0d1117; color: #ddd; border: 1px solid #1d2230;
+                 border-radius: 4px; padding: 6px 8px; font: 13px ui-monospace, Menlo, monospace; }
+  .pod-row { display: grid; grid-template-columns: 1fr 2fr 80px 1fr auto; gap: 8px;
+             margin-bottom: 8px; align-items: center; }
+  .pod-row input { padding: 6px; font: 12px ui-monospace, Menlo, monospace; }
+  .test-result { font: 11px ui-monospace, Menlo, monospace; color: #888;
+                 padding: 8px 12px; background: #0d1117; border-radius: 4px;
+                 margin-top: 6px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Workflow Runner</h1>
+  <nav>
+    <a href="/">Прогон</a>
+    <a href="/scenarios">Сценарии</a>
+    <a href="/video">Видео</a>
+    <a href="/settings" class="active">Настройки</a>
+  </nav>
+</header>
+
+<main>
+  <section class="card">
+    <h2>Execution hosts</h2>
+    <p class="muted">Укажи URL ComfyUI-инстанса. Для локального запуска
+       используй <code>http://127.0.0.1:8188</code>.</p>
+    <div id="pods"></div>
+    <button id="add-pod" class="ghost">+ добавить pod</button>
+  </section>
+
+  <section class="card">
+    <h2>S3</h2>
+    <p class="muted">Поля предзаполняются из env и дефолтов раннера.
+       Bucket берётся из `S3_BUCKET`, а если его нет — из `S3_MODELS_BASE`
+       или `S3_NODES_BASE`. Если bucket указан, каждая картинка/манифест
+       автоматически зеркалируются в S3. Креды берутся из env (AWS_*) или
+       из стандартного boto3-lookup.</p>
+    <div class="field"><label>Bucket</label><input id="s3-bucket" /></div>
+    <div class="field"><label>Prefix</label><input id="s3-prefix" /></div>
+    <div class="field"><label>Region</label><input id="s3-region" /></div>
+    <div class="field"><label>Endpoint URL (R2/MinIO)</label><input id="s3-endpoint" /></div>
+  </section>
+
+  <section class="card">
+    <h2>Workflow JSON-файлы</h2>
+    <p class="muted">Файлы лежат в <code>jobs/</code>. В <b>«Workflows mapping»</b>
+       ниже каждый ключ должен ссылаться на одно из этих имён.</p>
+    <table id="wf-files">
+      <thead><tr>
+        <th>Имя файла</th><th>Узлов</th><th>Размер</th><th>В мэппинге?</th><th></th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="actions">
+      <label class="drop" id="wf-drop" style="padding:14px 18px; flex:1;">
+        <input type="file" id="wf-input" accept=".json,application/json" hidden />
+        <div class="drop-body">
+          <strong>+ загрузить workflow JSON</strong>
+          <small>API-формат: Settings → Dev mode → Save (API Format)</small>
+          <em id="wf-name"></em>
+        </div>
+      </label>
+    </div>
+    <div id="wf-msg" class="muted"></div>
+  </section>
+
+  <section class="card">
+    <h2>Workflows mapping <small class="muted">(только для тонкой настройки)</small></h2>
+    <p class="muted">Если кнопка <b>Register</b> выше угадала узлы правильно —
+       сюда вообще не лазь. Тут YAML на случай, если в workflow
+       нестандартные ID или нужны точечные override'ы.</p>
+    <textarea id="workflows-yaml"></textarea>
+  </section>
+
+  <div class="actions">
+    <button id="save">💾 Сохранить</button>
+    <span id="save-msg" class="muted"></span>
+  </div>
+</main>
+
+<script>
+const ADMIN_TOKEN = localStorage.getItem("admin_token") || "";
+const auth = ADMIN_TOKEN ? { Authorization: "Bearer " + ADMIN_TOKEN } : {};
+const $ = (s) => document.querySelector(s);
+
+let config = null;
+
+async function load() {
+  config = await fetch("/api/config", { headers: auth }).then(r => r.json());
+  renderPods();
+  $("#s3-bucket").value   = config.s3?.bucket || "";
+  $("#s3-prefix").value   = config.s3?.prefix || "";
+  $("#s3-region").value   = config.s3?.region || "";
+  $("#s3-endpoint").value = config.s3?.endpoint_url || "";
+  // Workflows block as YAML text from the server (no browser-side YAML lib).
+  try {
+    const { yaml } = await fetch("/api/config/workflows_yaml",
+                                  { headers: auth }).then(r => r.json());
+    $("#workflows-yaml").value = yaml || "";
+  } catch (e) {
+    $("#workflows-yaml").value = "";
+  }
+}
+
+function renderPods() {
+  const wrap = $("#pods"); wrap.innerHTML = "";
+  (config.pods || []).forEach((p, i) => addPodRow(p, i));
+}
+
+function addPodRow(p = {}, i) {
+  const row = document.createElement("div");
+  row.className = "pod-row";
+  row.innerHTML = `
+    <input placeholder="name" value="${esc(p.name)}" data-k="name" />
+    <input placeholder="https://..." value="${esc(p.url)}" data-k="url" />
+    <input placeholder="parallel" type="number" min="1" value="${p.max_parallel || 1}" data-k="max_parallel" />
+    <input placeholder="api_key (опц.)" value="${esc(p.api_key || "")}" data-k="api_key" />
+    <span>
+      <button class="ghost test">Test</button>
+      <button class="ghost del">×</button>
+    </span>`;
+  row.querySelector(".del").onclick = () => {
+    config.pods.splice(i, 1); renderPods();
+  };
+  row.querySelector(".test").onclick = async () => {
+    const url = row.querySelector("[data-k=url]").value;
+    const api_key = row.querySelector("[data-k=api_key]").value;
+    const out = document.createElement("div"); out.className = "test-result";
+    row.parentNode.insertBefore(out, row.nextSibling);
+    out.textContent = "проверяю...";
+    const r = await fetch("/api/pods/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...auth },
+      body: JSON.stringify({ url, api_key }),
+    });
+    out.textContent = JSON.stringify(await r.json(), null, 2);
+  };
+  row.querySelectorAll("input").forEach(inp => {
+    inp.addEventListener("input", () => {
+      const v = inp.value;
+      config.pods[i][inp.dataset.k] = (inp.type === "number") ? parseInt(v) || 1 : v;
+    });
+  });
+  $("#pods").appendChild(row);
+}
+
+$("#add-pod").onclick = () => {
+  (config.pods ||= []).push({ name: "", url: "", max_parallel: 1, api_key: null });
+  renderPods();
+};
+
+$("#save").onclick = async () => {
+  $("#save-msg").textContent = "сохраняю...";
+  config.s3 = {
+    bucket: $("#s3-bucket").value,
+    prefix: $("#s3-prefix").value,
+    region: $("#s3-region").value,
+    endpoint_url: $("#s3-endpoint").value,
+  };
+  // Server parses workflows YAML; we pass it as a string field.
+  const payload = { ...config, workflows_yaml: $("#workflows-yaml").value };
+  const r = await fetch("/api/config", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", ...auth },
+    body: JSON.stringify(payload),
+  });
+  $("#save-msg").textContent = r.ok ? "✓ сохранено" : "ошибка: " + await r.text();
+};
+
+function esc(s) { return String(s ?? "").replace(/"/g, "&quot;"); }
+
+// ---- workflow files ------------------------------------------------------
+async function loadWorkflows() {
+  const d = await fetch("/api/workflows", { headers: auth }).then(r => r.json());
+  const tbody = document.querySelector("#wf-files tbody");
+  tbody.innerHTML = "";
+  const registered = new Set(d.registered || []);
+  for (const f of d.files) {
+    const tr = document.createElement("tr");
+    const stem = f.name.replace(/\.json$/i, "");
+    const wired = registered.has(stem);
+    tr.innerHTML = `
+      <td><code>${f.name}</code></td>
+      <td>${f.node_count}</td>
+      <td class="muted">${(f.size/1024).toFixed(1)} KB</td>
+      <td>${wired ? `<span style="color:#6c6">✓ ${stem}</span>`
+                  : `<span style="color:#fc6">не зарегистрирован</span>`}</td>
+      <td>
+        <button class="ghost reg" data-n="${f.name}">${wired ? "Re-register" : "Register"}</button>
+        <button class="ghost del" data-n="${f.name}">×</button>
+      </td>`;
+    tbody.appendChild(tr);
+  }
+  tbody.querySelectorAll("button.reg").forEach(b => b.onclick = async () => {
+    const msg = document.querySelector("#wf-msg");
+    msg.textContent = "регистрирую...";
+    const r = await fetch("/api/workflows/" + encodeURIComponent(b.dataset.n) +
+                          "/register",
+                          { method: "POST",
+                            headers: { "Content-Type": "application/json", ...auth },
+                            body: "{}" });
+    if (r.ok) {
+      const { key, mapping } = await r.json();
+      msg.textContent = `✓ ${key} зарегистрирован: ` +
+        `KSampler=${mapping.ksampler?.node}, ` +
+        `pos=${mapping.positive_prompt?.node}, ` +
+        `neg=${mapping.negative_prompt?.node}, ` +
+        `image=${mapping.load_images?.main?.node}, ` +
+        `save=[${(mapping.save_images||[]).join(",")}], ` +
+        `lora=[${(mapping.lora_loaders||[]).map(l=>l.node).join(",")||"—"}]`;
+      // refresh the YAML editor below so the user sees the change
+      load();
+      loadWorkflows();
+    } else {
+      msg.textContent = "ошибка: " + await r.text();
+    }
+  });
+  tbody.querySelectorAll("button.del").forEach(b => b.onclick = async () => {
+    if (!confirm("Удалить " + b.dataset.n + "?")) return;
+    const r = await fetch("/api/workflows/" + encodeURIComponent(b.dataset.n),
+                          { method: "DELETE", headers: auth });
+    document.querySelector("#wf-msg").textContent =
+      r.ok ? "✓ удалено" : "ошибка: " + await r.text();
+    loadWorkflows();
+  });
+}
+
+const wfDrop = document.querySelector("#wf-drop");
+const wfInput = document.querySelector("#wf-input");
+wfInput.addEventListener("change", () => uploadWf(wfInput.files));
+["dragenter", "dragover"].forEach(ev => wfDrop.addEventListener(ev, e => {
+  e.preventDefault(); wfDrop.classList.add("hover");
+}));
+["dragleave", "drop"].forEach(ev => wfDrop.addEventListener(ev, e => {
+  e.preventDefault(); wfDrop.classList.remove("hover");
+}));
+wfDrop.addEventListener("drop", e => { e.preventDefault(); uploadWf(e.dataTransfer.files); });
+
+async function uploadWf(files) {
+  const msg = document.querySelector("#wf-msg");
+  for (const f of files) {
+    if (!f.name.endsWith(".json")) {
+      msg.textContent = "только .json"; continue;
+    }
+    msg.textContent = "загружаю " + f.name + "...";
+    const fd = new FormData();
+    fd.append("file", f, f.name);
+    const r = await fetch("/api/workflows/upload",
+                          { method: "POST", body: fd, headers: auth });
+    if (r.ok) {
+      const { name, node_count } = await r.json();
+      msg.textContent = `✓ ${name} (${node_count} узлов)`;
+    } else {
+      msg.textContent = "ошибка: " + await r.text();
+    }
+  }
+  loadWorkflows();
+}
+
+loadWorkflows();
+load();
+</script>
+</body>
+</html>

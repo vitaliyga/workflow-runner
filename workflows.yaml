@@ -1,0 +1,19 @@
+# Все workflow в одном файле.
+# `defaults:` применяется к каждому флоу; в самом флоу — только то, что
+# отличается (например путь к template или переопределённый lora_loaders).
+#
+# Ключ блока должен совпадать со значением в колонке `workflow` в jobs.csv.
+
+defaults:
+  ksampler: { node: "348" }
+  positive_prompt: { node: "622" }
+  negative_prompt: { node: "343" }
+  load_images:
+    main: { node: "617" }
+  save_images: ["620"]
+  lora_loaders:
+    - node: "621"
+
+workflows:
+  sample_image_v1:
+    template: jobs/sample_image_v1.json

@@ -1,0 +1,20 @@
+[project]
+name = "workflow-runner"
+version = "0.1.0"
+description = "ComfyUI workflow runner — web UI"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "python-multipart>=0.0.9",     # multipart uploads
+    "aiohttp>=3.9",
+    "pyyaml>=6.0",
+    "boto3>=1.34",
+    "Pillow>=10.0",                # thumbnail generation
+]
+
+# Это приложение-скрипт, не библиотека. Ничего не упаковываем —
+# setuptools иначе путается в top-level папках (jobs/, static/, etc.).
+[tool.setuptools]
+py-modules = []

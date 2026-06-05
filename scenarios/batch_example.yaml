@@ -1,0 +1,28 @@
+# 2 subjects × 4 prompts = 8 jobs.
+# Example matrix: one input image per subject, fixed sampler, one model, varied prompts.
+
+workflow: sample_image_v1
+scenario: "1.3"
+
+subjects:
+  - { girl: subject_a, input_image: subject_a.png }
+  - { girl: subject_b, input_image: subject_b.png }
+
+loras:
+  - name: sample_lora.safetensors
+    strength_model: 1.0
+    strength_clip: 1.0
+
+ksampler:
+  seed: 5224601738438
+  steps: 8
+  cfg: 1.5
+  sampler_name: euler
+  scheduler: beta
+  denoise: 1.0
+
+prompts:
+  - { positive: "portrait, soft window light",      negative: "blurry" }
+  - { positive: "portrait, studio background",      negative: "blurry" }
+  - { positive: "portrait, simple office space",    negative: "blurry" }
+  - { positive: "portrait, neutral room",           negative: "blurry" }
