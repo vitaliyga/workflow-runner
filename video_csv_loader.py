@@ -5,7 +5,7 @@ CSV columns (all optional except workflow):
   input_image           - filename under inputs/ (for node 15)
   prompt_positive       - positive text (node 28)
   prompt_negative       - negative text (node 29)
-  seed                  - integer seed (node 125)
+  seed                  - integer seed (node 125); empty/0/-1/'random' -> random per row
   video_length_seconds  - int seconds (node 18)
   video_width           - int pixels (node 19)
   video_height          - int pixels (node 181)
@@ -28,8 +28,21 @@ from __future__ import annotations
 
 import csv
 import json
+import random
 from dataclasses import dataclass, field
 from pathlib import Path
+
+
+# An empty cell or a missing `seed` column means "pick a fresh random seed",
+# so each video job gets its own noise instead of all sharing seed 0.
+_RANDOM_SEED_TOKENS = {"", "0", "-1", "random", "rand"}
+
+
+def _parse_seed(raw: str) -> int:
+    token = (raw or "").strip().lower()
+    if token in _RANDOM_SEED_TOKENS:
+        return random.randint(0, 2**32 - 1)
+    return int(float(token))
 
 
 @dataclass
@@ -102,7 +115,7 @@ def load_video_jobs(path: Path) -> list[VideoJob]:
                 input_image=_f(row, "input_image", "").strip(),
                 prompt_positive=_f(row, "prompt_positive"),
                 prompt_negative=_f(row, "prompt_negative"),
-                seed=int(_f(row, "seed", "0") or 0),
+                seed=_parse_seed(_f(row, "seed", "")),
                 video_length_seconds=int(_f(row, "video_length_seconds", "5") or 5),
                 video_width=int(_f(row, "video_width", "832") or 832),
                 video_height=int(_f(row, "video_height", "1216") or 1216),

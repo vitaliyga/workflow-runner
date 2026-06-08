@@ -2,9 +2,23 @@
 from __future__ import annotations
 
 import csv
+import random
 from dataclasses import dataclass, field
 from pathlib import Path
 import re
+
+
+# Sentinels that mean "pick a fresh random seed for this row". An empty cell or
+# a missing `seed` column lands here too, so by default every job gets its own
+# noise instead of all sharing seed 0.
+_RANDOM_SEED_TOKENS = {"", "0", "-1", "random", "rand"}
+
+
+def _parse_seed(raw: str) -> int:
+    token = (raw or "").strip().lower()
+    if token in _RANDOM_SEED_TOKENS:
+        return random.randint(0, 2**32 - 1)
+    return int(float(token))
 
 
 @dataclass
@@ -103,7 +117,7 @@ def load_jobs(path: Path) -> list[Job]:
                 prompt_negative=_f(row, "prompt_negative"),
                 input_image=first_image,
                 input_images=images,
-                seed=int(_f(row, "seed", "0") or 0),
+                seed=_parse_seed(_f(row, "seed", "")),
                 control_after_generate=_f(row, "control_after_generate", "fixed"),
                 steps=int(_f(row, "steps", "20") or 20),
                 cfg=float(_f(row, "cfg", "7") or 7),
