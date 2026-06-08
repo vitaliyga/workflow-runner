@@ -90,7 +90,7 @@ def _f(row: dict[str, str], key: str, default: str = "") -> str:
 
 
 def _detect_delimiter(path: Path) -> str:
-    with path.open(newline="") as f:
+    with path.open(newline="", encoding="utf-8-sig") as f:
         first = f.readline()
     if first.count(";") > first.count(","):
         return ";"
@@ -100,7 +100,7 @@ def _detect_delimiter(path: Path) -> str:
 def load_video_jobs(path: Path) -> list[VideoJob]:
     jobs: list[VideoJob] = []
     delim = _detect_delimiter(path)
-    with path.open(newline="") as f:
+    with path.open(newline="", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f, delimiter=delim)
         for row in reader:
             extra = {

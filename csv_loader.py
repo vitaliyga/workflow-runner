@@ -50,7 +50,7 @@ def _f(row: dict[str, str], key: str, default: str = "") -> str:
 
 def _detect_delimiter(path: Path) -> str:
     # Excel / Google Sheets in many locales export with ";". Sniff the header.
-    with path.open(newline="") as f:
+    with path.open(newline="", encoding="utf-8-sig") as f:
         first = f.readline()
     if first.count(";") > first.count(","):
         return ";"
@@ -96,7 +96,7 @@ def load_jobs(path: Path) -> list[Job]:
         "control_after_generate", "steps", "cfg",
         "sampler_name", "scheduler", "denoise",
     }
-    with path.open(newline="") as f:
+    with path.open(newline="", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f, delimiter=delim)
         for row in reader:
             images = _row_images(row)
