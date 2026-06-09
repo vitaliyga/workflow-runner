@@ -903,6 +903,35 @@ def _run_day_tag(run_id: str) -> str:
         return time.strftime("%d-%m")
 
 
+async def _archive_run_meta(state: "RunState", s3: "S3Uploader | None") -> None:
+    """Snapshot the run's inputs/state into outputs/<day>/_runs/<run_id>/ so
+    they get mirrored to S3 next to the results.
+
+    Copies the original jobs.csv and the final status.json (the latter carries
+    the resolved seeds — incl. randomly generated ones — so a run is fully
+    reproducible from S3 alone). Best-effort: never breaks run completion.
+    """
+    try:
+        await state.persist()                      # status.json reflects final state
+        outputs_dir = state.dir / "outputs"
+        meta_dir = outputs_dir / _run_day_tag(state.run_id) / "_runs" / state.run_id
+        meta_dir.mkdir(parents=True, exist_ok=True)
+        for src in (state.dir / "jobs.csv", state.dir / "status.json"):
+            if not src.exists():
+                continue
+            dest = meta_dir / src.name
+            dest.write_bytes(src.read_bytes())
+            if s3:
+                rel = dest.relative_to(outputs_dir).as_posix()
+                try:
+                    key = await s3.upload(dest, rel)
+                    log.info("s3 ↑ run meta %s", key)
+                except Exception as e:
+                    log.warning("s3 upload failed for %s: %s", dest, e)
+    except Exception as e:
+        log.warning("archive run meta failed: %s", e)
+
+
 @app.post("/api/runs", dependencies=[Depends(auth_dep)])
 async def create_run(
     csv_file: UploadFile = File(...),
@@ -1040,6 +1069,7 @@ async def _run_pool(state: RunState, pool: WebPool, jobs) -> None:
         log.exception("pool crashed: %s", e)
     finally:
         state.finished_at = time.time()
+        await _archive_run_meta(state, pool.s3)
         await state.emit("run_finished")
 
 
@@ -1373,6 +1403,7 @@ async def _run_video_pool(
         log.exception("video pool crashed: %s", e)
     finally:
         state.finished_at = time.time()
+        await _archive_run_meta(state, s3)
         await state.emit("run_finished")
 
 
