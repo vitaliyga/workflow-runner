@@ -207,7 +207,11 @@ def build_workflow(template: dict[str, Any], mapping: WorkflowMapping,
 
     # LoRA — patch the first loader. Multi-LoRA stack: extend JobParams to a
     # list and iterate here.
-    if mapping.lora_loaders:
+    # Skip entirely when the CSV has no lora_name (empty): leave the template's
+    # own value intact. "Load Lora" rejects "" (only 'None' or a real file are
+    # valid), so overwriting a no-lora template ('None', strength 0) with an
+    # empty string causes a submit-time validation error.
+    if mapping.lora_loaders and params.lora_name:
         lora = mapping.lora_loaders[0]
         node_in = inputs(lora.node)
         node_in[lora.fields["name"]] = params.lora_name
