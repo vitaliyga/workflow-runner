@@ -51,19 +51,30 @@ def day_dir_name(day_tag: str | None = None) -> str:
     return day_tag or time.strftime("%d-%m")
 
 
-def output_dir(root: Path, job: Job, day_tag: str | None = None) -> Path:
-    parts = [root, day_dir_name(day_tag), slug(job.workflow)]
-    if job.lora_name:
-        parts.append(lora_dir_name(job.lora_name))
-    parts.extend([slug(job.girl), params_dir_name(job)])
-    return Path(*parts)
+def workflow_dir_name(job: Job, run_tag: str | None = None) -> str:
+    """Second-level folder: '<HHMMSS>_<workflow>' so every run gets its own
+    subtree under the day. Falls back to just the workflow slug when no
+    run_tag is supplied."""
+    wf = slug(job.workflow)
+    return f"{run_tag}_{wf}" if run_tag else wf
 
 
-def save_prefix(job: Job, idx: int, day_tag: str | None = None) -> str:
+def output_dir(root: Path, job: Job, day_tag: str | None = None,
+               run_tag: str | None = None) -> Path:
+    # Layout: <day>/<HHMMSS_workflow>/<girl>/<params>
+    return Path(
+        root, day_dir_name(day_tag), workflow_dir_name(job, run_tag),
+        slug(job.girl), params_dir_name(job),
+    )
+
+
+def save_prefix(job: Job, idx: int, day_tag: str | None = None,
+                run_tag: str | None = None) -> str:
     """filename_prefix for ComfyUI SaveImage. Keeps results within a
-    per-job subfolder on the pod so concurrent jobs don't collide."""
-    parts = [day_dir_name(day_tag), slug(job.workflow)]
-    if job.lora_name:
-        parts.append(lora_dir_name(job.lora_name))
-    parts.extend([slug(job.girl), params_dir_name(job)])
+    per-job subfolder on the pod so concurrent jobs don't collide.
+    Mirrors output_dir: <day>/<HHMMSS_workflow>/<girl>/<params>/<idx>."""
+    parts = [
+        day_dir_name(day_tag), workflow_dir_name(job, run_tag),
+        slug(job.girl), params_dir_name(job),
+    ]
     return f"lora_runner/{'/'.join(parts)}/{idx:05d}"

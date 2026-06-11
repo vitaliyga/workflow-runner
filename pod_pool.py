@@ -42,6 +42,7 @@ class PodPool:
         inputs_dir: Path,
         outputs_dir: Path,
         day_tag: str | None = None,
+        run_tag: str | None = None,
         max_attempts: int = 3,
         dry_run: bool = False,
         s3: S3Uploader | None = None,
@@ -51,6 +52,7 @@ class PodPool:
         self.inputs_dir = inputs_dir
         self.outputs_dir = outputs_dir
         self.day_tag = day_tag or time.strftime("%d-%m")
+        self.run_tag = run_tag
         self.max_attempts = max_attempts
         self.dry_run = dry_run
         self.s3 = s3
@@ -136,7 +138,7 @@ class PodPool:
                 self._upload_cache[cache_key] = remote_name
             remote_images.append(remote_name)
 
-        prefix = save_prefix(job, item.idx, self.day_tag)
+        prefix = save_prefix(job, item.idx, self.day_tag, self.run_tag)
         params = JobParams(
             lora_name=job.lora_name,
             lora_strength_model=job.lora_strength_model,
@@ -161,7 +163,7 @@ class PodPool:
         prompt_id = await client.submit(wf)
         entry = await client.wait(prompt_id)
 
-        out_dir = output_dir(self.outputs_dir, job, self.day_tag)
+        out_dir = output_dir(self.outputs_dir, job, self.day_tag, self.run_tag)
         out_dir.mkdir(parents=True, exist_ok=True)
 
         outputs = client.outputs_from_history(entry, set(bundle.mapping.save_images))
@@ -205,7 +207,7 @@ class PodPool:
         # We don't require the image to exist in dry-run — we just record
         # what would be uploaded.
 
-        prefix = save_prefix(job, item.idx, self.day_tag)
+        prefix = save_prefix(job, item.idx, self.day_tag, self.run_tag)
         params = JobParams(
             lora_name=job.lora_name,
             lora_strength_model=job.lora_strength_model,
@@ -227,7 +229,7 @@ class PodPool:
 
         await asyncio.sleep(0.05)        # simulate latency so concurrency is visible
 
-        out_dir = output_dir(self.outputs_dir, job, self.day_tag)
+        out_dir = output_dir(self.outputs_dir, job, self.day_tag, self.run_tag)
         out_dir.mkdir(parents=True, exist_ok=True)
 
         # Dry run writes the patched workflow only; no photo-side JSON.

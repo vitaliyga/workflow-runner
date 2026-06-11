@@ -903,6 +903,15 @@ def _run_day_tag(run_id: str) -> str:
         return time.strftime("%d-%m")
 
 
+def _run_time_tag(run_id: str) -> str:
+    """HHMMSS from the run_id (format YYYYMMDD-HHMMSS-hex). Used as the
+    second-level output folder so each run gets its own subtree under the day."""
+    parts = run_id.split("-")
+    if len(parts) >= 2 and len(parts[1]) == 6 and parts[1].isdigit():
+        return parts[1]
+    return time.strftime("%H%M%S")
+
+
 async def _archive_run_meta(state: "RunState", s3: "S3Uploader | None") -> None:
     """Snapshot the run's inputs/state into outputs/<day>/_runs/<run_id>/ so
     they get mirrored to S3 next to the results.
@@ -1054,6 +1063,7 @@ async def start_run(run_id: str) -> dict[str, Any]:
         inputs_dir=state.dir / "inputs",
         outputs_dir=state.dir / "outputs",
         day_tag=_run_day_tag(run_id),
+        run_tag=_run_time_tag(run_id),
         s3=s3,
     )
 
@@ -1460,9 +1470,11 @@ async def _video_handle(
         remote_image = await client.upload_image(local_img)
 
     day_tag = _run_day_tag(state.run_id)
+    # Layout: <day>/<HHMMSS_workflow>/<girl>. HHMMSS groups each run separately.
+    wf_tag = f"{_run_time_tag(state.run_id)}_{_safe_tag(job.workflow, 'video')}"
     # folder/filename carry the CSV 'girl' value so outputs are grouped per subject
     girl_tag = _safe_tag(job.girl, f"{idx:05d}")
-    prefix = f"video/{day_tag}/{girl_tag}/{girl_tag}_{idx:05d}_seed{job.seed}"
+    prefix = f"video/{day_tag}/{wf_tag}/{girl_tag}/{girl_tag}_{idx:05d}_seed{job.seed}"
 
     # CSV row -> field-key values. Only fields present in the flow's mapping
     # are patched; everything else keeps the template default.
@@ -1496,7 +1508,7 @@ async def _video_handle(
     # Download all outputs (video files). Top-level folder = run date (DD-MM),
     # then the previous per-job layout. This propagates everywhere rel paths
     # are used: local outputs, S3 key, status files list, thumbnails, archive.
-    out_dir = state.dir / "outputs" / day_tag / girl_tag
+    out_dir = state.dir / "outputs" / day_tag / wf_tag / girl_tag
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Save node = VHS_VideoCombine (detect its id from the template).
