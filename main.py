@@ -42,7 +42,7 @@ from starlette.background import BackgroundTask
 
 from csv_loader import load_jobs
 from expand_scenario import expand as expand_scenario_dict
-from path_builder import save_prefix
+from path_builder import save_prefix, slug
 from pod_client import PodConfig
 from pod_pool import PodPool
 from s3_uploader import S3Uploader
@@ -913,30 +913,46 @@ def _run_time_tag(run_id: str) -> str:
 
 
 async def _archive_run_meta(state: "RunState", s3: "S3Uploader | None") -> None:
-    """Snapshot the run's inputs/state into outputs/<day>/_runs/<run_id>/ so
-    they get mirrored to S3 next to the results.
+    """Snapshot the run's inputs/state into the run folder root
+    (outputs/<day>/<HHMMSS_workflow>/) so they get mirrored to S3 next to the
+    results.
 
     Copies the original jobs.csv and the final status.json (the latter carries
     the resolved seeds — incl. randomly generated ones — so a run is fully
-    reproducible from S3 alone). Best-effort: never breaks run completion.
+    reproducible from S3 alone). A run mixing several workflows gets a copy in
+    each workflow folder. Best-effort: never breaks run completion.
     """
     try:
         await state.persist()                      # status.json reflects final state
         outputs_dir = state.dir / "outputs"
-        meta_dir = outputs_dir / _run_day_tag(state.run_id) / "_runs" / state.run_id
-        meta_dir.mkdir(parents=True, exist_ok=True)
-        for src in (state.dir / "jobs.csv", state.dir / "status.json"):
-            if not src.exists():
-                continue
-            dest = meta_dir / src.name
-            dest.write_bytes(src.read_bytes())
-            if s3:
-                rel = dest.relative_to(outputs_dir).as_posix()
-                try:
-                    key = await s3.upload(dest, rel)
-                    log.info("s3 ↑ run meta %s", key)
-                except Exception as e:
-                    log.warning("s3 upload failed for %s: %s", dest, e)
+        day = _run_day_tag(state.run_id)
+        hhmmss = _run_time_tag(state.run_id)
+        # The run-folder names must match the actual output layout: image runs
+        # use path_builder.slug, video runs use _safe_tag.
+        names = {j.get("workflow") for j in state.jobs if j.get("workflow")}
+        if state.run_type == "video":
+            folders = {f"{hhmmss}_{_safe_tag(w, 'video')}" for w in names}
+        else:
+            folders = {f"{hhmmss}_{slug(w)}" for w in names}
+        if not folders:
+            folders = {hhmmss}
+
+        sources = [state.dir / "jobs.csv", state.dir / "status.json"]
+        for folder in folders:
+            meta_dir = outputs_dir / day / folder
+            meta_dir.mkdir(parents=True, exist_ok=True)
+            for src in sources:
+                if not src.exists():
+                    continue
+                dest = meta_dir / src.name
+                dest.write_bytes(src.read_bytes())
+                if s3:
+                    rel = dest.relative_to(outputs_dir).as_posix()
+                    try:
+                        key = await s3.upload(dest, rel)
+                        log.info("s3 ↑ run meta %s", key)
+                    except Exception as e:
+                        log.warning("s3 upload failed for %s: %s", dest, e)
     except Exception as e:
         log.warning("archive run meta failed: %s", e)
 
