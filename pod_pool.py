@@ -43,6 +43,7 @@ class PodPool:
         outputs_dir: Path,
         day_tag: str | None = None,
         run_tag: str | None = None,
+        save_prompt: bool = False,
         max_attempts: int = 3,
         dry_run: bool = False,
         s3: S3Uploader | None = None,
@@ -53,6 +54,7 @@ class PodPool:
         self.outputs_dir = outputs_dir
         self.day_tag = day_tag or time.strftime("%d-%m")
         self.run_tag = run_tag
+        self.save_prompt = save_prompt
         self.max_attempts = max_attempts
         self.dry_run = dry_run
         self.s3 = s3
@@ -184,8 +186,18 @@ class PodPool:
             local_files.append(dest)
             outputs_by_node.setdefault(node_id, []).append(img)
 
-        if self.s3:
+        # Optional: write the positive prompt next to each output, same stem
+        # (image_00001_.png -> image_00001_.txt). Uploaded to S3 too, but kept
+        # out of the returned media list.
+        prompt_files: list[Path] = []
+        if self.save_prompt and (job.prompt_positive or "").strip():
             for p in local_files:
+                txt = p.with_suffix(".txt")
+                txt.write_text(job.prompt_positive, encoding="utf-8")
+                prompt_files.append(txt)
+
+        if self.s3:
+            for p in local_files + prompt_files:
                 rel = p.relative_to(self.outputs_dir).as_posix()
                 try:
                     key = await self.s3.upload(p, rel)

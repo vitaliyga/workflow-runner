@@ -331,6 +331,7 @@ class RunState:
         self.started_at: float | None = None
         self.finished_at: float | None = None
         self.cancelled: bool = False
+        self.save_prompt: bool = False         # write a .txt prompt next to each output
         self.subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
         self._lock = asyncio.Lock()
 
@@ -344,6 +345,7 @@ class RunState:
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "cancelled": self.cancelled,
+            "save_prompt": self.save_prompt,
             "counts": counts,
             "total": len(self.jobs),
             "jobs": self.jobs,
@@ -391,6 +393,7 @@ def get_run(run_id: str) -> RunState:
         state.started_at = data.get("started_at")
         state.finished_at = data.get("finished_at")
         state.cancelled = data.get("cancelled", False)
+        state.save_prompt = data.get("save_prompt", False)
     RUN_STATES[run_id] = state
     return state
 
@@ -962,6 +965,7 @@ async def create_run(
     csv_file: UploadFile = File(...),
     photos: list[UploadFile] = File(default=[]),
     run_type: str = Form(default="image"),
+    save_prompt: bool = Form(default=False),
 ) -> dict[str, Any]:
     run_id = _make_run_id()
     rd = RUNS / run_id
@@ -982,6 +986,7 @@ async def create_run(
 
     # Parse CSV into initial job rows
     state = RunState(run_id, rd, run_type=run_type or "image")
+    state.save_prompt = save_prompt
     jobs = load_jobs(rd / "jobs.csv")
     for i, j in enumerate(jobs):
         input_images = list(j.input_images or ((j.input_image,) if j.input_image else ()))
@@ -1080,6 +1085,7 @@ async def start_run(run_id: str) -> dict[str, Any]:
         outputs_dir=state.dir / "outputs",
         day_tag=_run_day_tag(run_id),
         run_tag=_run_time_tag(run_id),
+        save_prompt=state.save_prompt,
         s3=s3,
     )
 
@@ -1305,6 +1311,7 @@ def _resolve_video_flows(cfg: dict[str, Any], jobs: list[VideoJob]) -> dict[str,
 async def create_video_run(
     csv_file: UploadFile = File(...),
     photos: list[UploadFile] = File(default=[]),
+    save_prompt: bool = Form(default=False),
 ) -> dict[str, Any]:
     """Create a video batch run from a CSV with LTX-specific columns."""
     run_id = _make_run_id()
@@ -1324,6 +1331,7 @@ async def create_video_run(
         saved_photos.append(name)
 
     state = RunState(run_id, rd, run_type="video")
+    state.save_prompt = save_prompt
     jobs = load_video_jobs(rd / "jobs.csv")
     for i, j in enumerate(jobs):
         state.jobs.append({
@@ -1545,8 +1553,17 @@ async def _video_handle(
         await client.download(img["filename"], img["subfolder"], img["type"], dest)
         local_files.append(dest)
 
-    if s3:
+    # Optional: write the positive prompt next to each video (same stem),
+    # uploaded to S3 too but kept out of the returned media list.
+    prompt_files: list[Path] = []
+    if state.save_prompt and (job.prompt_positive or "").strip():
         for p in local_files:
+            txt = p.with_suffix(".txt")
+            txt.write_text(job.prompt_positive, encoding="utf-8")
+            prompt_files.append(txt)
+
+    if s3:
+        for p in local_files + prompt_files:
             rel = p.relative_to(state.dir / "outputs").as_posix()
             try:
                 key = await s3.upload(p, rel)
