@@ -117,10 +117,14 @@ VIDEO_FIELD_CATALOG: list[dict[str, Any]] = [
     # Some flows (LTX 2.3 v2) carry a SECOND distilled loader for the final
     # pass. Patching only the first pass leaves the final pass on the template
     # default and produces blurry output, so it gets its own column.
+    # Detected ONLY by title (distilled + final/last) — no legacy default node,
+    # because node id 260 means different things across flows (e.g. an audio
+    # VAE node in LTX v1). So v1, which has a single distilled loader, never
+    # picks up a bogus final-pass mapping.
     {"key": "load_distilled_lora_final_json", "label": "Lora (distilled, финальный проход)",
      "field": "", "kind": "lora", "cast": "json",
      "title_kw": [["distilled", "final"], ["distilled", "last"]],
-     "classes": [], "default": "260"},
+     "classes": []},
 ]
 
 _CATALOG_BY_KEY = {f["key"]: f for f in VIDEO_FIELD_CATALOG}
