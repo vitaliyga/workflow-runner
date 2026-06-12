@@ -163,28 +163,13 @@
     <h2>1. Загрузить CSV для видео</h2>
 
     <div class="csv-info-box">
-      <h4>Колонки CSV (ноды LTX 2.3)</h4>
-      <div class="cols-grid">
-        <div class="col-item"><code>input_image</code><small>Нода 15 — имя файла фото</small></div>
-        <div class="col-item"><code>load_loras_json</code><small>Нода 6 — JSON лоры (Power Lora Loader)</small></div>
-        <div class="col-item"><code>load_distilled_lora_json</code><small>Нода 7 — JSON distilled лоры</small></div>
-        <div class="col-item"><code>video_length_seconds</code><small>Нода 18 — длина видео</small></div>
-        <div class="col-item"><code>video_width</code><small>Нода 19 — ширина (px)</small></div>
-        <div class="col-item"><code>video_height</code><small>Нода 181 — высота (px)</small></div>
-        <div class="col-item"><code>seed</code><small>Нода 125 — сид</small></div>
-        <div class="col-item"><code>sigmas_first_pass</code><small>Нода 225 — ManualSigmas</small></div>
-        <div class="col-item"><code>sigmas_final_pass</code><small>Нода 226 — ManualSigmas</small></div>
-        <div class="col-item"><code>prompt_positive</code><small>Нода 28 — позитив</small></div>
-        <div class="col-item"><code>prompt_negative</code><small>Нода 29 — негатив</small></div>
-        <div class="col-item"><code>cfg_first_pass</code><small>Нода 245 — CFGGuider</small></div>
-        <div class="col-item"><code>cfg_final_pass</code><small>Нода 255 — CFGGuider</small></div>
-        <div class="col-item"><code>audio_volume_first</code><small>Нода 249 — AudioAdjustVolume</small></div>
-        <div class="col-item"><code>audio_volume_final</code><small>Нода 251 — AudioAdjustVolume</small></div>
-        <div class="col-item"><code>checkpoint_name</code><small>Нода 1 — Load Checkpoint</small></div>
-        <div class="col-item"><code>diffusion_model_name</code><small>Нода 186 — Load Diffusion Model</small></div>
-        <div class="col-item"><code>girl</code><small>Метка / имя</small></div>
-        <div class="col-item"><code>scenario</code><small>Группа / сцена</small></div>
+      <div class="wf-picker">
+        <label for="wf-select">Workflow / версия:</label>
+        <select id="wf-select"><option value="">загрузка…</option></select>
       </div>
+      <h4 id="cols-title">Колонки CSV</h4>
+      <div class="cols-grid" id="cols-grid"></div>
+      <div id="wf-hint" class="muted"></div>
       <a class="download-sample" href="/api/video-runs/sample-csv" id="btn-sample-csv">
         ⬇ Скачать пример CSV
       </a>

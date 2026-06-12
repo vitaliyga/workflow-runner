@@ -267,6 +267,84 @@ async function loadHistory() {
 loadHistory();
 setInterval(loadHistory, 10000);
 
+// ---- workflow / version picker -----------------------------------------
+// Lists registered video flows (incl. LTX v1/v2). Selecting one shows that
+// flow's CSV columns and points the sample-CSV link at its per-flow sample.
+const FIELD_LABELS = {
+  input_image: "входное фото", prompt_positive: "позитивный промт",
+  prompt_negative: "негативный промт", seed: "сид",
+  video_length_seconds: "длина (сек)", video_width: "ширина", video_height: "высота",
+  sigmas_first_pass: "sigmas 1-й проход", sigmas_final_pass: "sigmas финальный",
+  cfg_first_pass: "CFG 1-й проход", cfg_final_pass: "CFG финальный",
+  audio_volume_first: "громкость 1-й", audio_volume_final: "громкость финал",
+  checkpoint_name: "checkpoint", diffusion_model_name: "diffusion model",
+  load_loras_json: "лора (основная)",
+  load_distilled_lora_json: "лора distilled — 1-й проход",
+  load_distilled_lora_final_json: "лора distilled — финальный проход",
+};
+
+let videoFlows = [];
+
+async function loadFlows() {
+  const sel = $("#wf-select");
+  let data;
+  try {
+    const r = await fetch("/api/workflows", { headers: authHeaders() });
+    if (!r.ok) throw new Error(await r.text());
+    data = await r.json();
+  } catch (e) {
+    sel.innerHTML = '<option value="">(не удалось загрузить)</option>';
+    return;
+  }
+  videoFlows = (data.workflows || []).filter(w => w.video && w.available);
+  if (!videoFlows.length) {
+    sel.innerHTML = '<option value="">(нет видео-флоу)</option>';
+    $("#cols-grid").innerHTML = "";
+    $("#wf-hint").textContent =
+      "Нет зарегистрированных видео-флоу. Загрузите JSON в Настройки → Upload → Register.";
+    $("#btn-sample-csv").setAttribute("href", "/api/video-runs/sample-csv");
+    return;
+  }
+  sel.innerHTML = "";
+  videoFlows.forEach(w => {
+    const o = document.createElement("option");
+    o.value = w.name; o.textContent = w.name;
+    sel.appendChild(o);
+  });
+  selectFlow(videoFlows[0].name);
+}
+
+function selectFlow(name) {
+  const flow = videoFlows.find(w => w.name === name);
+  if (!flow) return;
+  $("#wf-select").value = name;
+  $("#btn-sample-csv").setAttribute(
+    "href", `/api/workflows/${encodeURIComponent(name)}/sample_csv`);
+  $("#cols-title").textContent = `Колонки CSV — ${name}`;
+  const grid = $("#cols-grid");
+  grid.innerHTML = "";
+  // workflow/scenario/girl are always present in samples
+  const base = [["workflow", "ключ флоу"], ["girl", "метка / имя"], ["scenario", "группа / сцена"]];
+  const fields = flow.video_fields || {};
+  base.forEach(([k, d]) => grid.appendChild(colItem(k, d)));
+  Object.keys(fields).forEach(k => {
+    const node = fields[k] && fields[k].node ? `нода ${fields[k].node}` : "";
+    grid.appendChild(colItem(k, [FIELD_LABELS[k] || "", node].filter(Boolean).join(" — ")));
+  });
+  $("#wf-hint").textContent =
+    "«Скачать пример CSV» даст файл ровно с этими колонками, предзаполненный значениями шаблона.";
+}
+
+function colItem(code, sub) {
+  const div = document.createElement("div");
+  div.className = "col-item";
+  div.innerHTML = `<code>${esc(code)}</code><small>${esc(sub)}</small>`;
+  return div;
+}
+
+$("#wf-select").addEventListener("change", (e) => selectFlow(e.target.value));
+loadFlows();
+
 async function downloadVideoArchive(btn, runId) {
   const archiveMsg = $("#archive-msg");
   const originalText = btn.textContent;

@@ -45,6 +45,9 @@ main { max-width: 1400px; margin: 0 auto; padding: 24px 28px; display: grid; gap
 .actions { margin-top: 14px; display: flex; gap: 10px; align-items: center; }
 .toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: #444; cursor: pointer; user-select: none; }
 .toggle input { margin: 0; cursor: pointer; }
+.wf-picker { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+.wf-picker label { font-weight: 600; font-size: 13px; }
+.wf-picker select { padding: 6px 8px; border: 1px solid #ccc; border-radius: 6px; font-size: 13px; min-width: 220px; }
 button, a.ghost {
   background: #2a5; color: #111; border: 0; padding: 8px 16px;
   border-radius: 4px; font-weight: 600; cursor: pointer; font-size: 13px;

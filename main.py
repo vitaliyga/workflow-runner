@@ -205,7 +205,12 @@ def _workflow_meta(name: str, defaults: dict[str, Any], spec: dict[str, Any]) ->
         "name": name,
         "template": str(template_raw or ""),
         "available": bool(template_path and template_path.exists()),
+        "video": bool(spec.get("is_video")),
     }
+    if out["video"]:
+        # Mapped CSV columns for this video flow ({col: {node, field}}), so the
+        # /video page can show per-workflow columns without a second request.
+        out["video_fields"] = spec.get("video_fields") or {}
     if not template_path or not template_path.exists():
         return out
 
