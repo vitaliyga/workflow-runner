@@ -1520,6 +1520,7 @@ async def _video_handle(
         "diffusion_model_name": job.diffusion_model_name,
         "load_loras_json": job.load_loras_json,
         "load_distilled_lora_json": job.load_distilled_lora_json,
+        "load_distilled_lora_final_json": job.load_distilled_lora_final_json,
     }
     wf = build_video_workflow(template, values, mapping,
                               save_prefix=prefix, extra=job.extra)

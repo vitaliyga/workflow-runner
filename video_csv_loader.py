@@ -17,8 +17,9 @@ CSV columns (all optional except workflow):
   audio_volume_final    - float (node 251)
   checkpoint_name       - .safetensors filename (node 1)
   diffusion_model_name  - .safetensors filename (node 186)
-  load_loras_json       - JSON patch for node 6 (Power Lora Loader)
-  load_distilled_lora_json - JSON patch for node 7 (Power Lora Loader)
+  load_loras_json       - JSON patch for the main Power Lora Loader
+  load_distilled_lora_json - JSON patch for the distilled LoRA (first pass)
+  load_distilled_lora_final_json - JSON patch for the distilled LoRA (final pass; LTX v2)
   girl                  - label/display name
   scenario              - group tag
 
@@ -67,6 +68,7 @@ class VideoJob:
     diffusion_model_name: str
     load_loras_json: str
     load_distilled_lora_json: str
+    load_distilled_lora_final_json: str
     extra: dict[str, str] = field(default_factory=dict)
 
 
@@ -80,7 +82,7 @@ _KNOWN = {
     "cfg_first_pass", "cfg_final_pass",
     "audio_volume_first", "audio_volume_final",
     "checkpoint_name", "diffusion_model_name",
-    "load_loras_json", "load_distilled_lora_json",
+    "load_loras_json", "load_distilled_lora_json", "load_distilled_lora_final_json",
 }
 
 
@@ -129,6 +131,7 @@ def load_video_jobs(path: Path) -> list[VideoJob]:
                 diffusion_model_name=_f(row, "diffusion_model_name"),
                 load_loras_json=_f(row, "load_loras_json"),
                 load_distilled_lora_json=_f(row, "load_distilled_lora_json"),
+                load_distilled_lora_final_json=_f(row, "load_distilled_lora_final_json"),
                 extra=extra,
             ))
     return jobs
@@ -142,7 +145,7 @@ SAMPLE_CSV_HEADER = (
     "cfg_first_pass,cfg_final_pass,"
     "audio_volume_first,audio_volume_final,"
     "checkpoint_name,diffusion_model_name,"
-    "load_loras_json,load_distilled_lora_json"
+    "load_loras_json,load_distilled_lora_json,load_distilled_lora_final_json"
 )
 
 SAMPLE_CSV_ROW = (
@@ -159,7 +162,8 @@ SAMPLE_CSV_ROW = (
     'my_checkpoint.safetensors,'
     'my_diffusion_model.safetensors,'
     '"{""lora_16"": {""on"": true, ""lora"": ""my_style_lora.safetensors"", ""strength"": 0.85}}",'
-    '"{""lora_2"": {""on"": true, ""lora"": ""my_distilled_lora.safetensors"", ""strength"": 0.6}}"'
+    '"{""lora_2"": {""on"": true, ""lora"": ""my_distilled_lora.safetensors"", ""strength"": 0.6}}",'
+    '"{""lora_1"": {""on"": true, ""lora"": ""my_distilled_lora.safetensors"", ""strength"": 0.6}}"'
 )
 
 SAMPLE_CSV = SAMPLE_CSV_HEADER + "\n" + SAMPLE_CSV_ROW + "\n"

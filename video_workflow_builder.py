@@ -108,10 +108,19 @@ VIDEO_FIELD_CATALOG: list[dict[str, Any]] = [
      "classes": ["Power Lora Loader (rgthree)"], "default": "6",
      "exclude_kw": ["distilled"]},
 
-    {"key": "load_distilled_lora_json", "label": "Lora (distilled)", "field": "",
+    {"key": "load_distilled_lora_json", "label": "Lora (distilled, 1-й проход)", "field": "",
      "kind": "lora", "cast": "json",
      "title_kw": [["distilled"]],
-     "classes": [], "default": "7"},
+     "classes": [], "default": "7",
+     "exclude_kw": ["final", "last"]},
+
+    # Some flows (LTX 2.3 v2) carry a SECOND distilled loader for the final
+    # pass. Patching only the first pass leaves the final pass on the template
+    # default and produces blurry output, so it gets its own column.
+    {"key": "load_distilled_lora_final_json", "label": "Lora (distilled, финальный проход)",
+     "field": "", "kind": "lora", "cast": "json",
+     "title_kw": [["distilled", "final"], ["distilled", "last"]],
+     "classes": [], "default": "260"},
 ]
 
 _CATALOG_BY_KEY = {f["key"]: f for f in VIDEO_FIELD_CATALOG}
