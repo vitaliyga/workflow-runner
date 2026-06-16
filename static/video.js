@@ -171,7 +171,17 @@ function upsertRow(j) {
     <td>${dims ? `<span class="video-badge">${esc(dims)}</span>` : ""}</td>
     <td>${dur ? `<span class="video-badge">${esc(dur)}</span>` : ""}</td>
     <td class="s-${status}">${status}${j.error ? `<br><small>${esc(j.error)}</small>` : ""}</td>
+    <td class="dur">${fmtDuration(j.duration)}</td>
     <td class="files">${files}</td>`;
+}
+
+// Per-job generation time → "42с" / "1м 05с".
+function fmtDuration(sec) {
+  if (sec == null || isNaN(sec)) return "";
+  const s = Math.round(sec);
+  if (s < 60) return `${s}с`;
+  const m = Math.floor(s / 60);
+  return `${m}м ${String(s % 60).padStart(2, "0")}с`;
 }
 
 function updateCounts(c = {}, total = 0) {

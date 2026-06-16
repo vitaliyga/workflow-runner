@@ -122,6 +122,15 @@ function showHint(kind, text) {
 }
 function clearHint() { $("#hint").classList.add("hidden"); }
 
+// Per-job generation time → "42с" / "1м 05с".
+function fmtDuration(sec) {
+  if (sec == null || isNaN(sec)) return "";
+  const s = Math.round(sec);
+  if (s < 60) return `${s}с`;
+  const m = Math.floor(s / 60);
+  return `${m}м ${String(s % 60).padStart(2, "0")}с`;
+}
+
 // ---- run view + SSE ------------------------------------------------------
 let currentRunId = null;
 let evtSrc = null;
@@ -204,6 +213,7 @@ function upsertRow(j) {
     <td class="prompt" title="${escape(j.prompt_positive || "")}">${escape(j.prompt_positive || "")}</td>
     <td>${j.seed || ""}</td>
     <td class="s-${status}">${status}${j.error ? `<br><small>${escape(j.error)}</small>` : ""}</td>
+    <td class="dur">${fmtDuration(j.duration)}</td>
     <td class="thumbs">${thumbs}</td>
     <td class="files">${files}</td>`;
 }

@@ -477,8 +477,10 @@ class WebPool(PodPool):
         # Update inline; merge with any prior fields.
         for j in self.state.jobs:
             if j["idx"] == idx:
+                now = time.time()
                 j["status"] = status
-                j["updated_at"] = time.time()
+                j["updated_at"] = now
+                _stamp_job_timing(j, status, now)
                 for k, v in extra.items():
                     j[k] = v
                 await self.state.emit("job_updated", job=j)
@@ -912,6 +914,17 @@ def _run_day_tag(run_id: str) -> str:
         return datetime.strptime(prefix, "%Y%m%d").strftime("%d-%m")
     except ValueError:
         return time.strftime("%d-%m")
+
+
+def _stamp_job_timing(job: dict[str, Any], status: str, now: float) -> None:
+    """Per-job generation timing. Stamps the (latest) attempt start on
+    'running' and computes `duration` (seconds) on 'done'/'failed'."""
+    if status == "running":
+        job["started_ts"] = now
+    elif status in ("done", "failed"):
+        start = job.get("started_ts")
+        if start:
+            job["duration"] = round(now - start, 1)
 
 
 def _run_time_tag(run_id: str) -> str:
@@ -1673,8 +1686,10 @@ async def _video_handle(
 async def _video_set_status(state: RunState, idx: int, status: str, **extra: Any) -> None:
     for j in state.jobs:
         if j["idx"] == idx:
+            now = time.time()
             j["status"] = status
-            j["updated_at"] = time.time()
+            j["updated_at"] = now
+            _stamp_job_timing(j, status, now)
             for k, v in extra.items():
                 j[k] = v
             await state.emit("job_updated", job=j)
