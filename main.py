@@ -351,6 +351,9 @@ class RunState:
             "finished_at": self.finished_at,
             "cancelled": self.cancelled,
             "save_prompt": self.save_prompt,
+            "queued": self.run_id in RUN_QUEUE,
+            "queue_position": (RUN_QUEUE.index(self.run_id) + 1
+                               if self.run_id in RUN_QUEUE else None),
             "counts": counts,
             "total": len(self.jobs),
             "jobs": self.jobs,
@@ -1032,70 +1035,172 @@ def _missing_inputs(state: RunState) -> list[str]:
     return sorted(n for n in needed if not (inputs / n).exists())
 
 
-@app.post("/api/runs/{run_id}/start", dependencies=[Depends(auth_dep)])
-async def start_run(run_id: str) -> dict[str, Any]:
-    state = get_run(run_id)
+# ---------------------------------------------------------------------------
+# Run launch + global sequential queue
+#
+# "Запустить" launches immediately (fire-and-forget). "Поставить в очередь"
+# appends the run to RUN_QUEUE; a single worker runs queued runs one at a time
+# and only when nothing else is active — so queued runs never overlap each
+# other or an immediately-started run. (A GPU processes one job at a time
+# anyway, so serial is the natural mode — see README/onboarding note.)
+
+RUN_QUEUE: list[str] = []                 # run_ids waiting, FIFO by enqueue order
+_queue_task: "asyncio.Task | None" = None
+
+
+def _validate_run(state: RunState) -> None:
+    """Cheap pre-flight shared by start + queue. Raises HTTPException so the
+    user gets immediate feedback; the heavy build happens at execution time."""
     if state.started_at and not state.finished_at:
         raise HTTPException(409, "already running")
-
+    if state.run_id in RUN_QUEUE:
+        raise HTTPException(409, "already queued")
     missing = _missing_inputs(state)
     if missing:
         raise HTTPException(400, f"missing input photos: {missing}")
+    cfg = load_config()
+    if not (cfg.get("pods") or []):
+        raise HTTPException(400, "no pods configured (see /settings)")
+    registered = (cfg.get("workflows") or {}).get("workflows") or {}
+    unknown = sorted({j.get("workflow") for j in state.jobs
+                      if j.get("workflow") and j["workflow"] not in registered})
+    if unknown:
+        raise HTTPException(400, f"workflow(s) not registered: {', '.join(unknown)}")
 
+
+def _any_run_active(exclude: str | None = None) -> bool:
+    for rid, st in RUN_STATES.items():
+        if rid == exclude:
+            continue
+        if st.started_at and not st.finished_at:
+            return True
+    return False
+
+
+async def _execute_image_run(state: RunState) -> None:
     cfg = load_config()
     pod_cfgs = [
         PodConfig(name=p["name"], url=p["url"],
-                  max_parallel=p.get("max_parallel", 1),
-                  api_key=p.get("api_key"))
+                  max_parallel=p.get("max_parallel", 1), api_key=p.get("api_key"))
         for p in cfg.get("pods") or []
     ]
     if not pod_cfgs:
-        raise HTTPException(400, "no pods configured (see /settings)")
-
-    # Write workflows.yaml on the fly to a temp file inside the run dir, so
-    # WorkflowRegistry can read it as a single source of truth. We resolve
-    # every `template:` to an absolute path against the project root,
-    # because the YAML now lives in the run dir (not next to jobs/).
-    wf_block = json.loads(json.dumps(cfg["workflows"]))   # deep copy
+        raise RuntimeError("no pods configured")
+    # workflows.yaml on the fly (templates resolved to absolute paths)
+    wf_block = json.loads(json.dumps(cfg["workflows"]))
     for spec in (wf_block.get("workflows") or {}).values():
         t = spec.get("template")
         if t and not Path(t).is_absolute():
             spec["template"] = str((ROOT / t).resolve())
     wf_path = state.dir / "workflows.yaml"
-    wf_path.write_text(yaml.safe_dump(wf_block, sort_keys=False,
-                                       allow_unicode=True))
+    wf_path.write_text(yaml.safe_dump(wf_block, sort_keys=False, allow_unicode=True))
     registry = WorkflowRegistry(wf_path)
-    # Validate all referenced workflows — translate missing-key into a
-    # readable 400 instead of a 500 in the background task.
     for j in state.jobs:
-        try:
-            registry.get(j["workflow"])
-        except KeyError as e:
-            raise HTTPException(400, str(e))
-        except FileNotFoundError as e:
-            raise HTTPException(400, f"workflow template missing: {e}")
-
+        registry.get(j["workflow"])
     s3 = _s3_from_config(cfg.get("s3") or {})
-
     state.started_at = time.time()
     state.finished_at = None
     state.cancelled = False
     await state.emit("run_started")
-
     pool = WebPool(
-        state=state,
-        pods=pod_cfgs,
-        workflows=registry,
-        inputs_dir=state.dir / "inputs",
-        outputs_dir=state.dir / "outputs",
-        day_tag=_run_day_tag(run_id),
-        run_tag=_run_time_tag(run_id),
-        save_prompt=state.save_prompt,
-        s3=s3,
+        state=state, pods=pod_cfgs, workflows=registry,
+        inputs_dir=state.dir / "inputs", outputs_dir=state.dir / "outputs",
+        day_tag=_run_day_tag(state.run_id), run_tag=_run_time_tag(state.run_id),
+        save_prompt=state.save_prompt, s3=s3,
     )
-
     csv_jobs = load_jobs(state.dir / "jobs.csv")
-    asyncio.create_task(_run_pool(state, pool, csv_jobs))
+    await _run_pool(state, pool, csv_jobs)
+
+
+async def _execute_video_run(state: RunState) -> None:
+    cfg = load_config()
+    pod_cfgs = [
+        PodConfig(name=p["name"], url=p["url"],
+                  max_parallel=p.get("max_parallel", 1), api_key=p.get("api_key"))
+        for p in cfg.get("pods") or []
+    ]
+    if not pod_cfgs:
+        raise RuntimeError("no pods configured")
+    video_jobs = load_video_jobs(state.dir / "jobs.csv")
+    flows = _resolve_video_flows(cfg, video_jobs)
+    s3 = _s3_from_config(cfg.get("s3") or {})
+    state.started_at = time.time()
+    state.finished_at = None
+    state.cancelled = False
+    await state.emit("run_started")
+    await _run_video_pool(state, pod_cfgs, video_jobs, flows, s3)
+
+
+async def _execute_run(state: RunState) -> None:
+    """Build + run this run to completion (awaits). Dispatches by run_type and
+    always leaves it finished, even if the launch itself fails."""
+    try:
+        if state.run_type == "video":
+            await _execute_video_run(state)
+        else:
+            await _execute_image_run(state)
+    except Exception as e:
+        log.exception("run %s failed to launch: %s", state.run_id, e)
+        for j in state.jobs:
+            if j["status"] in ("pending", "running"):
+                j["status"] = "failed"
+                j["error"] = f"launch failed: {e}"
+        state.finished_at = state.finished_at or time.time()
+        await state.emit("run_finished")
+
+
+def _ensure_queue_worker() -> None:
+    global _queue_task
+    if _queue_task is None or _queue_task.done():
+        _queue_task = asyncio.create_task(_queue_loop())
+
+
+async def _queue_loop() -> None:
+    """Process RUN_QUEUE one run at a time, never overlapping an active run."""
+    global _queue_task
+    try:
+        while RUN_QUEUE:
+            while _any_run_active():       # wait out anything still running
+                await asyncio.sleep(2)
+            if not RUN_QUEUE:
+                break
+            run_id = RUN_QUEUE[0]
+            state = RUN_STATES.get(run_id)
+            if state is None:
+                RUN_QUEUE.pop(0)
+                continue
+            await _execute_run(state)      # blocks until this run finishes
+            if RUN_QUEUE and RUN_QUEUE[0] == run_id:
+                RUN_QUEUE.pop(0)
+            # refresh positions for whoever is left waiting
+            for rid in list(RUN_QUEUE):
+                st = RUN_STATES.get(rid)
+                if st:
+                    await st.emit("queue_update")
+    finally:
+        _queue_task = None
+
+
+@app.post("/api/runs/{run_id}/queue", dependencies=[Depends(auth_dep)])
+async def queue_run(run_id: str) -> dict[str, Any]:
+    """Add a run to the global sequential queue. Starts automatically when no
+    other run is active; otherwise waits its turn (FIFO by enqueue order).
+    Works for both image and video runs."""
+    state = get_run(run_id)
+    _validate_run(state)
+    RUN_QUEUE.append(run_id)
+    position = len(RUN_QUEUE)
+    await state.emit("queued", position=position)
+    _ensure_queue_worker()
+    return {"ok": True, "queued": True, "position": position}
+
+
+@app.post("/api/runs/{run_id}/start", dependencies=[Depends(auth_dep)])
+async def start_run(run_id: str) -> dict[str, Any]:
+    """Launch a run immediately (fire-and-forget), independent of the queue."""
+    state = get_run(run_id)
+    _validate_run(state)
+    asyncio.create_task(_execute_run(state))
     return {"ok": True}
 
 
@@ -1254,6 +1359,8 @@ async def delete_run(run_id: str) -> dict[str, Any]:
     import shutil
     shutil.rmtree(target)
     RUN_STATES.pop(run_id, None)
+    if run_id in RUN_QUEUE:
+        RUN_QUEUE.remove(run_id)
     return {"ok": True}
 
 
@@ -1261,6 +1368,9 @@ async def delete_run(run_id: str) -> dict[str, Any]:
 async def cancel_run(run_id: str) -> dict[str, Any]:
     state = get_run(run_id)
     state.cancelled = True
+    # Drop from the queue if it was waiting (or being processed).
+    if run_id in RUN_QUEUE:
+        RUN_QUEUE.remove(run_id)
     await state.emit("run_cancelled")
     # The PodPool doesn't currently look at this flag — we leave proper
     # cancellation to a follow-up commit. For now mark pending → cancelled.
@@ -1372,39 +1482,12 @@ async def create_video_run(
 
 @app.post("/api/video-runs/{run_id}/start", dependencies=[Depends(auth_dep)])
 async def start_video_run(run_id: str) -> dict[str, Any]:
-    """Start processing a video run with direct node patching."""
+    """Launch a video run immediately (fire-and-forget)."""
     state = get_run(run_id)
     if state.run_type != "video":
         raise HTTPException(400, "not a video run")
-    if state.started_at and not state.finished_at:
-        raise HTTPException(409, "already running")
-
-    missing = _missing_inputs(state)
-    if missing:
-        raise HTTPException(400, f"missing input photos: {missing}")
-
-    cfg = load_config()
-    pod_cfgs = [
-        PodConfig(name=p["name"], url=p["url"],
-                  max_parallel=p.get("max_parallel", 1),
-                  api_key=p.get("api_key"))
-        for p in cfg.get("pods") or []
-    ]
-    if not pod_cfgs:
-        raise HTTPException(400, "no pods configured (see /settings)")
-
-    video_jobs = load_video_jobs(state.dir / "jobs.csv")
-    # Resolve template + mapping per workflow key (raises if any unregistered).
-    flows = _resolve_video_flows(cfg, video_jobs)
-
-    s3 = _s3_from_config(cfg.get("s3") or {})
-
-    state.started_at = time.time()
-    state.finished_at = None
-    state.cancelled = False
-    await state.emit("run_started")
-
-    asyncio.create_task(_run_video_pool(state, pod_cfgs, video_jobs, flows, s3))
+    _validate_run(state)
+    asyncio.create_task(_execute_run(state))
     return {"ok": True}
 
 

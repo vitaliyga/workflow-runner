@@ -211,6 +211,26 @@ $("#btn-start").addEventListener("click", async () => {
   showHint("info", "Поехали — задания уходят на pod'ы. Прогресс будет тут.");
 });
 
+$("#btn-queue").addEventListener("click", async () => {
+  if (!currentRunId) return;
+  $("#start-msg").textContent = "ставлю в очередь...";
+  // Generic queue endpoint works for video runs too (same run_id namespace).
+  const r = await fetch(`/api/runs/${currentRunId}/queue`,
+                        { method: "POST", headers: authHeaders() });
+  $("#start-msg").textContent = "";
+  if (!r.ok) {
+    const txt = await r.text();
+    let msg = txt;
+    try { msg = JSON.parse(txt).detail || txt; } catch {}
+    showHint("error", "В очередь не удалось: " + msg);
+    return;
+  }
+  const data = await r.json().catch(() => ({}));
+  showHint("info", data.position > 1
+    ? `В очереди — позиция ${data.position}. Стартует, когда освободится pod.`
+    : "В очереди — стартует автоматически (pod свободен).");
+});
+
 $("#btn-cancel").addEventListener("click", async () => {
   if (!currentRunId) return;
   const r = await fetch(`/api/runs/${currentRunId}/cancel`,
