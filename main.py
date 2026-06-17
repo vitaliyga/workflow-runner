@@ -337,6 +337,7 @@ class RunState:
         self.finished_at: float | None = None
         self.cancelled: bool = False
         self.save_prompt: bool = False         # write a .txt prompt next to each output
+        self.lora_folder: bool = False         # video: insert a <lora+strength> folder before girl
         self.subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
         self._lock = asyncio.Lock()
 
@@ -351,6 +352,7 @@ class RunState:
             "finished_at": self.finished_at,
             "cancelled": self.cancelled,
             "save_prompt": self.save_prompt,
+            "lora_folder": self.lora_folder,
             "queued": self.run_id in RUN_QUEUE,
             "queue_position": (RUN_QUEUE.index(self.run_id) + 1
                                if self.run_id in RUN_QUEUE else None),
@@ -402,6 +404,7 @@ def get_run(run_id: str) -> RunState:
         state.finished_at = data.get("finished_at")
         state.cancelled = data.get("cancelled", False)
         state.save_prompt = data.get("save_prompt", False)
+        state.lora_folder = data.get("lora_folder", False)
     RUN_STATES[run_id] = state
     return state
 
@@ -914,6 +917,33 @@ def _run_day_tag(run_id: str) -> str:
         return datetime.strptime(prefix, "%Y%m%d").strftime("%d-%m")
     except ValueError:
         return time.strftime("%d-%m")
+
+
+def _lora_folder_tag(load_loras_json: str) -> str:
+    """Folder segment built from the ACTIVE loras in a load_loras_json value:
+    '<name>_s<strength>' per enabled lora, joined by '__'. Empty if none/parse
+    error. Lets video outputs be grouped by exact lora setup."""
+    raw = (load_loras_json or "").strip()
+    if not raw:
+        return ""
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return ""
+    parts: list[str] = []
+    if isinstance(data, dict):
+        for v in data.values():
+            if not (isinstance(v, dict) and v.get("on")):
+                continue
+            name = Path(str(v.get("lora", ""))).stem
+            if not name:
+                continue
+            try:
+                strength = f"{float(v.get('strength', 1)):g}"
+            except (ValueError, TypeError):
+                strength = _safe_tag(str(v.get("strength", "")), "x")
+            parts.append(f"{_safe_tag(name, 'lora')}_s{strength}")
+    return "__".join(parts)
 
 
 def _stamp_job_timing(job: dict[str, Any], status: str, now: float) -> None:
@@ -1440,6 +1470,7 @@ async def create_video_run(
     csv_file: UploadFile = File(...),
     photos: list[UploadFile] = File(default=[]),
     save_prompt: bool = Form(default=False),
+    lora_folder: bool = Form(default=False),
 ) -> dict[str, Any]:
     """Create a video batch run from a CSV with LTX-specific columns."""
     run_id = _make_run_id()
@@ -1460,6 +1491,7 @@ async def create_video_run(
 
     state = RunState(run_id, rd, run_type="video")
     state.save_prompt = save_prompt
+    state.lora_folder = lora_folder
     jobs = load_video_jobs(rd / "jobs.csv")
     for i, j in enumerate(jobs):
         state.jobs.append({
@@ -1595,11 +1627,15 @@ async def _video_handle(
         remote_image = await client.upload_image(local_img)
 
     day_tag = _run_day_tag(state.run_id)
-    # Layout: <day>/<HHMMSS_workflow>/<girl>. HHMMSS groups each run separately.
+    # Layout: <day>/<HHMMSS_workflow>/[<lora+strength>/]<girl>. HHMMSS groups
+    # each run; the optional lora folder (toggle) groups by exact lora setup.
     wf_tag = f"{_run_time_tag(state.run_id)}_{_safe_tag(job.workflow, 'video')}"
     # folder/filename carry the CSV 'girl' value so outputs are grouped per subject
     girl_tag = _safe_tag(job.girl, f"{idx:05d}")
-    prefix = f"video/{day_tag}/{wf_tag}/{girl_tag}/{girl_tag}_{idx:05d}_seed{job.seed}"
+    lora_tag = _lora_folder_tag(job.load_loras_json) if state.lora_folder else ""
+    rel_parts = [day_tag, wf_tag] + ([lora_tag] if lora_tag else []) + [girl_tag]
+    rel_dir = "/".join(rel_parts)
+    prefix = f"video/{rel_dir}/{girl_tag}_{idx:05d}_seed{job.seed}"
 
     # CSV row -> field-key values. Only fields present in the flow's mapping
     # are patched; everything else keeps the template default.
@@ -1634,7 +1670,7 @@ async def _video_handle(
     # Download all outputs (video files). Top-level folder = run date (DD-MM),
     # then the previous per-job layout. This propagates everywhere rel paths
     # are used: local outputs, S3 key, status files list, thumbnails, archive.
-    out_dir = state.dir / "outputs" / day_tag / wf_tag / girl_tag
+    out_dir = state.dir / "outputs" / Path(*rel_parts)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Save node = VHS_VideoCombine (detect its id from the template).

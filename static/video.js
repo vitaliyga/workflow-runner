@@ -62,6 +62,7 @@ $("#btn-create").addEventListener("click", async () => {
   const fd = new FormData();
   fd.append("csv_file", csvFile);
   fd.append("save_prompt", $("#save-prompt-input")?.checked ? "true" : "false");
+  fd.append("lora_folder", $("#lora-folder-input")?.checked ? "true" : "false");
   photoFiles.forEach((f) => fd.append("photos", f, f.name));
 
   let r;
