@@ -196,8 +196,18 @@ class PodPool:
                 txt.write_text(job.prompt_positive, encoding="utf-8")
                 prompt_files.append(txt)
 
+        # Always: write the exact patched workflow next to each output
+        # (image_00001_.png -> image_00001_.json). This is the graph that
+        # produced the image — drop it into ComfyUI to reproduce 1:1.
+        graph_files: list[Path] = []
+        wf_json = json.dumps(wf, ensure_ascii=False, indent=2)
+        for p in local_files:
+            gp = p.with_suffix(".json")
+            gp.write_text(wf_json, encoding="utf-8")
+            graph_files.append(gp)
+
         if self.s3:
-            for p in local_files + prompt_files:
+            for p in local_files + prompt_files + graph_files:
                 rel = p.relative_to(self.outputs_dir).as_posix()
                 try:
                     key = await self.s3.upload(p, rel)

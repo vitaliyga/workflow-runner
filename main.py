@@ -1664,8 +1664,17 @@ async def _video_handle(
             txt.write_text(job.prompt_positive, encoding="utf-8")
             prompt_files.append(txt)
 
+    # Always: write the exact patched workflow next to each video (same stem),
+    # so the generating graph can be reproduced 1:1 in ComfyUI.
+    graph_files: list[Path] = []
+    wf_json = json.dumps(wf, ensure_ascii=False, indent=2)
+    for p in local_files:
+        gp = p.with_suffix(".json")
+        gp.write_text(wf_json, encoding="utf-8")
+        graph_files.append(gp)
+
     if s3:
-        for p in local_files + prompt_files:
+        for p in local_files + prompt_files + graph_files:
             rel = p.relative_to(state.dir / "outputs").as_posix()
             try:
                 key = await s3.upload(p, rel)
