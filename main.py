@@ -748,11 +748,18 @@ async def detect_workflow(name: str) -> dict[str, Any]:
     except json.JSONDecodeError as e:
         raise HTTPException(400, f"invalid JSON: {e}")
     video = is_video_workflow(wf)
+    uni = []
+    if video:
+        for c in full_columns(wf):
+            lab = c["label"].lower()
+            default = c["image"] or any(w in lab for w in ("positive", "negative", "seed"))
+            uni.append({**c, "default": default})
     return {
         "name": safe,
         "key": Path(safe).stem,
         "is_video": video,
         "video_fields": _video_field_candidates(wf) if video else [],
+        "universal_fields": uni,
     }
 
 
@@ -797,6 +804,16 @@ async def register_workflow(name: str, body: dict[str, Any] = None) -> dict[str,
             "is_video": True,
             "video_fields": video_fields,
         }
+        # Universal mode: the UI may instead send title-based columns the user
+        # ticked. Stored only to drive the sample CSV — runtime patches any
+        # universal column present in the CSV via full_columns translation.
+        uni = body.get("universal_columns")
+        if isinstance(uni, list) and uni:
+            entry["universal_columns"] = [
+                {"label": str(c.get("label")), "node": str(c.get("node")),
+                 "field": str(c.get("field")), "image": bool(c.get("image"))}
+                for c in uni if c.get("label") and c.get("node") and c.get("field")
+            ]
         for k, v in (body.get("overrides") or {}).items():
             entry[k] = v
         mapping = entry
@@ -831,8 +848,13 @@ async def workflow_sample_csv(name: str) -> StreamingResponse:
     if not tmpl_path.exists():
         raise HTTPException(404, f"template missing: {tmpl_path.name}")
     template = json.loads(tmpl_path.read_text())
-    mapping = spec.get("video_fields") or default_video_mapping(template)
-    csv_text = sample_csv_for(template, mapping, key)
+    uni = spec.get("universal_columns")
+    if uni:
+        labels = [c["label"] for c in uni]
+        csv_text = universal_sample_csv(template, key, only_labels=labels)
+    else:
+        mapping = spec.get("video_fields") or default_video_mapping(template)
+        csv_text = sample_csv_for(template, mapping, key)
     return StreamingResponse(
         iter([csv_text]),
         media_type="text/csv",

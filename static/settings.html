@@ -273,20 +273,23 @@ async function configureWf(name) {
       `Жми <b>Register</b>, маппинг определится автоматически.</div>`;
     return;
   }
-  const rows = d.video_fields.map(f => `
+  // Universal columns derived from THIS flow's nodes (title-based) — works for
+  // any workflow, no fixed catalog. Each row = one editable node input.
+  const ufields = d.universal_fields || [];
+  const rows = ufields.map((f, i) => `
     <label class="vf-row" style="display:flex;gap:8px;align-items:center;margin:3px 0;">
-      <input type="checkbox" data-key="${f.key}" ${f.detected ? "checked" : ""}>
-      <b style="min-width:160px">${f.label}</b>
-      <span class="muted" style="min-width:90px">CSV: <code>${f.key}</code></span>
-      нода <input data-node="${f.key}" value="${esc(f.node)}" size="5"
-                 style="width:60px">
-      <small class="muted">${esc(f.title)}</small>
+      <input type="checkbox" data-i="${i}" ${f.default ? "checked" : ""}>
+      <b style="min-width:230px">${esc(f.label)}</b>
+      ${f.image ? '<span class="muted" style="min-width:60px">🖼 фото</span>'
+                : `<span class="muted" style="min-width:60px">${esc(f.cast)}</span>`}
+      нода <input data-node="${i}" value="${esc(f.node)}" size="5" style="width:60px">
+      <small class="muted">${esc(String(f.value)).slice(0,40)}</small>
     </label>`).join("");
   panel.innerHTML = `
     <div class="card" style="margin-top:10px;padding:12px;border:1px solid #444;border-radius:8px;">
       <h3 style="margin:0 0 6px">⚙ ${name} — какие ноды править из CSV</h3>
-      <p class="muted" style="margin:0 0 8px">Отметь поля, которые будешь задавать в CSV.
-         Снятые галочки = нода держит своё значение из шаблона. Номер ноды можно поправить.</p>
+      <p class="muted" style="margin:0 0 8px">Колонки = редактируемые входы нод этого флоу (по названию).
+         Отметь те, что будешь задавать в CSV; имя колонки = название ноды. Снятые = из шаблона.</p>
       <div id="vf-list">${rows}</div>
       <div class="actions" style="margin-top:10px">
         <button id="vf-save">💾 Зарегистрировать выбранные</button>
@@ -297,20 +300,23 @@ async function configureWf(name) {
     </div>`;
 
   const collect = () => {
-    const vf = {};
+    const cols = [];
     panel.querySelectorAll("#vf-list .vf-row").forEach(row => {
       const cb = row.querySelector("input[type=checkbox]");
-      const key = cb.dataset.key;
-      const node = row.querySelector(`[data-node="${key}"]`).value.trim();
-      if (cb.checked && node) vf[key] = { node };
+      const i = +cb.dataset.i;
+      const f = ufields[i];
+      const node = row.querySelector(`[data-node="${i}"]`).value.trim();
+      if (cb.checked && node) {
+        cols.push({ label: f.label, node, field: f.field, image: !!f.image });
+      }
     });
-    return vf;
+    return cols;
   };
   const doRegister = async () => {
     const key = d.key;
     const r = await fetch("/api/workflows/" + encodeURIComponent(name) + "/register",
       { method: "POST", headers: { "Content-Type": "application/json", ...auth },
-        body: JSON.stringify({ key, video_fields: collect() }) });
+        body: JSON.stringify({ key, universal_columns: collect() }) });
     panel.querySelector("#vf-msg").textContent =
       r.ok ? "✓ сохранено" : "ошибка: " + await r.text();
     if (r.ok) { load(); loadWorkflows(); }

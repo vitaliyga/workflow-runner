@@ -423,6 +423,10 @@ def full_columns(template: dict[str, Any]) -> list[dict[str, Any]]:
         if not isinstance(node, dict):
             continue
         ct = str(node.get("class_type") or "")
+        # Save nodes' filename_prefix/codec/format are runner-controlled — skip
+        # to keep the universal column list clean.
+        if ct in VIDEO_SAVE_CLASSES:
+            continue
         title = str((node.get("_meta") or {}).get("title") or ct or nid)
         for field, v in (node.get("inputs") or {}).items():
             if _editable_value(v):
@@ -453,10 +457,16 @@ def full_columns(template: dict[str, Any]) -> list[dict[str, Any]]:
     return cols
 
 
-def universal_sample_csv(template: dict[str, Any], workflow_key: str) -> str:
-    """One-row sample CSV with EVERY editable input as a column (title-based),
-    pre-filled with the template's current values. The user trims to taste."""
+def universal_sample_csv(template: dict[str, Any], workflow_key: str,
+                         only_labels: list[str] | None = None) -> str:
+    """One-row sample CSV with editable inputs as columns (title-based),
+    pre-filled with the template's current values. If `only_labels` is given,
+    keep just those columns (the set the user ticked at registration);
+    otherwise dump every editable input."""
     cols = full_columns(template)
+    if only_labels:
+        want = set(only_labels)
+        cols = [c for c in cols if c["label"] in want]
     header = ["workflow", "scenario", "girl"] + [c["label"] for c in cols]
     row = ["", "scene_01", "ModelName"]
     row[0] = workflow_key
