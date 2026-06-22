@@ -77,14 +77,39 @@ if (csvFile) {
 }
 
 // ---- create run ---------------------------------------------------------
+// Upload photos to an existing run in small batches — one giant multipart
+// request (hundreds of files) gets dropped by the RunPod proxy. Returns the
+// latest missing_inputs from the server.
+async function uploadPhotosInBatches(runId, files, onProgress) {
+  const MAX_FILES = 20, MAX_BYTES = 25 * 1024 * 1024;
+  let i = 0, done = 0, missing = [];
+  while (i < files.length) {
+    const fd = new FormData();
+    let n = 0, bytes = 0;
+    while (i < files.length && n < MAX_FILES && bytes < MAX_BYTES) {
+      const f = files[i++];
+      fd.append("photos", f, f.name);
+      n++; bytes += f.size || 0;
+    }
+    const r = await fetch(`/api/runs/${runId}/inputs`,
+                          { method: "POST", body: fd, headers: authHeaders() });
+    if (!r.ok) throw new Error(await r.text());
+    const data = await r.json().catch(() => ({}));
+    if (Array.isArray(data.missing_inputs)) missing = data.missing_inputs;
+    done += n;
+    if (onProgress) onProgress(done, files.length);
+  }
+  return missing;
+}
+
 $("#btn-create").addEventListener("click", async () => {
   $("#btn-create").disabled = true;
-  $("#create-msg").textContent = "загружаю...";
+  $("#create-msg").textContent = "создаю прогон...";
+  // 1) create the run with the CSV only (tiny request)
   const fd = new FormData();
   fd.append("csv_file", csvFile);
   fd.append("run_type", PAGE_RUN_TYPE);
   fd.append("save_prompt", $("#save-prompt-input")?.checked ? "true" : "false");
-  photoFiles.forEach((f) => fd.append("photos", f, f.name));
   let r;
   try {
     r = await fetch("/api/runs", {
@@ -100,14 +125,29 @@ $("#btn-create").addEventListener("click", async () => {
     $("#btn-create").disabled = false;
     return;
   }
-  const { run_id, total, missing_inputs } = await r.json();
+  let { run_id, total, missing_inputs } = await r.json();
+  // 2) upload photos in batches (robust to hundreds of files)
+  if (photoFiles.length) {
+    try {
+      missing_inputs = await uploadPhotosInBatches(run_id, photoFiles,
+        (d, t) => { $("#create-msg").textContent = `загрузка фото ${d}/${t}…`; });
+    } catch (e) {
+      $("#create-msg").textContent = "";
+      $("#btn-create").disabled = false;
+      await openRun(run_id, total);
+      showHint("error",
+        `Загрузка фото оборвалась: ${e}. Часть могла не дойти — ` +
+        `проверь «не загружены фото» ниже и повтори (фото можно слать частями).`);
+      return;
+    }
+  }
   $("#create-msg").textContent = "";
   clearBuilderCsv();
   await openRun(run_id, total);
   if (missing_inputs && missing_inputs.length) {
     showHint("warn",
-      `⚠ Не загружены фото: ${missing_inputs.join(", ")}. ` +
-      `Без них запуск упадёт. Положи их и пересоздай прогон.`);
+      `⚠ Не загружены фото: ${missing_inputs.length} шт. ` +
+      `Без них запуск упадёт. Дозагрузи и пересоздай прогон.`);
   } else {
     showHint("info",
       `✓ Прогон создан, ${total} заданий готово. Нажми «▶ Запустить генерацию».`);

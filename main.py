@@ -1079,6 +1079,23 @@ def _missing_inputs(state: RunState) -> list[str]:
     return sorted(n for n in needed if not (inputs / n).exists())
 
 
+@app.post("/api/runs/{run_id}/inputs", dependencies=[Depends(auth_dep)])
+async def add_run_inputs(
+    run_id: str,
+    photos: list[UploadFile] = File(default=[]),
+) -> dict[str, Any]:
+    """Add input photos to an existing run, in small batches. Lets the frontend
+    upload many references without one giant multipart request (the RunPod proxy
+    drops huge/slow uploads). Works for image and video runs alike."""
+    state = get_run(run_id)
+    saved: list[str] = []
+    for p in photos:
+        name = Path(p.filename or "unnamed").name
+        (state.dir / "inputs" / name).write_bytes(await p.read())
+        saved.append(name)
+    return {"ok": True, "saved": saved, "missing_inputs": _missing_inputs(state)}
+
+
 # ---------------------------------------------------------------------------
 # Run launch + global sequential queue
 #
