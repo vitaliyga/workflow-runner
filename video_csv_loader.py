@@ -47,6 +47,13 @@ def _parse_seed(raw: str) -> int:
     return int(float(token))
 
 
+def _opt_int(raw: str) -> int | None:
+    """int from CSV cell, or None if the cell/column is absent — so missing
+    values stay blank in the UI and don't override the template."""
+    raw = (raw or "").strip()
+    return int(float(raw)) if raw else None
+
+
 @dataclass
 class VideoJob:
     workflow: str
@@ -57,9 +64,9 @@ class VideoJob:
     prompt_positive: str
     prompt_negative: str
     seed: int
-    video_length_seconds: int
-    video_width: int
-    video_height: int
+    video_length_seconds: int | None    # None = column absent → kept from template, blank in UI
+    video_width: int | None
+    video_height: int | None
     sigmas_first_pass: str
     sigmas_final_pass: str
     cfg_first_pass: float
@@ -121,9 +128,9 @@ def load_video_jobs(path: Path) -> list[VideoJob]:
                 prompt_positive=_f(row, "prompt_positive"),
                 prompt_negative=_f(row, "prompt_negative"),
                 seed=_parse_seed(_f(row, "seed", "")),
-                video_length_seconds=int(_f(row, "video_length_seconds", "5") or 5),
-                video_width=int(_f(row, "video_width", "832") or 832),
-                video_height=int(_f(row, "video_height", "1216") or 1216),
+                video_length_seconds=_opt_int(_f(row, "video_length_seconds", "")),
+                video_width=_opt_int(_f(row, "video_width", "")),
+                video_height=_opt_int(_f(row, "video_height", "")),
                 sigmas_first_pass=_f(row, "sigmas_first_pass"),
                 sigmas_final_pass=_f(row, "sigmas_final_pass"),
                 cfg_first_pass=float(_f(row, "cfg_first_pass", "1.5") or 1.5),
