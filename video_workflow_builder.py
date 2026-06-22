@@ -32,10 +32,17 @@ from typing import Any
 #                that node actually exists in the template
 # --------------------------------------------------------------------------
 VIDEO_FIELD_CATALOG: list[dict[str, Any]] = [
-    {"key": "input_image", "label": "Входное фото", "field": "image",
+    {"key": "input_image", "label": "Входное фото (1-й кадр)", "field": "image",
      "kind": "scalar", "cast": "str",
-     "title_kw": [["load", "image"], ["input", "image"]],
-     "classes": ["LoadImage"], "default": "15"},
+     "title_kw": [["first", "frame"], ["load", "image"], ["input", "image"]],
+     "classes": ["LoadImage"], "default": "15",
+     "exclude_kw": ["last", "distilled"]},
+
+    # 2nd reference frame for FLF2V (First-Last-Frame-to-Video) flows. Matched
+    # only by a "last frame/image" title — single-frame flows never pick it up.
+    {"key": "input_image_last", "label": "Входное фото (последний кадр)", "field": "image",
+     "kind": "scalar", "cast": "str",
+     "title_kw": [["last", "frame"], ["last", "image"]], "classes": []},
 
     {"key": "prompt_positive", "label": "Позитивный промт", "field": "text",
      "kind": "scalar", "cast": "str",
@@ -45,9 +52,11 @@ VIDEO_FIELD_CATALOG: list[dict[str, Any]] = [
      "kind": "scalar", "cast": "str",
      "title_kw": [["negative"]], "classes": [], "default": "29"},
 
+    # seed: classic "Seed" nodes use field `seed`; RandomNoise uses `noise_seed`.
     {"key": "seed", "label": "Seed", "field": "seed",
      "kind": "scalar", "cast": "int",
-     "title_kw": [["seed"]], "classes": ["Seed (rgthree)", "Seed"], "default": "125"},
+     "title_kw": [["seed"]], "classes": ["Seed (rgthree)", "Seed", "RandomNoise"],
+     "class_fields": {"RandomNoise": "noise_seed"}, "default": "125"},
 
     {"key": "video_length_seconds", "label": "Длина (сек)", "field": "Xi",
      "kind": "dual", "cast": "int",
@@ -102,9 +111,12 @@ VIDEO_FIELD_CATALOG: list[dict[str, Any]] = [
      "title_kw": [["diffusion", "model"], ["unet"]],
      "classes": ["UNETLoader", "UnetLoaderGGUF"], "default": "186"},
 
+    # JSON-patch only fits Power Lora Loader (rgthree). Match by class or a
+    # "power"+"lora" title — NOT a bare "lora" (that grabs a plain
+    # LoraLoaderModelOnly titled "Load LoRA", which the JSON format breaks).
     {"key": "load_loras_json", "label": "Lora (основная)", "field": "",
      "kind": "lora", "cast": "json",
-     "title_kw": [["lora"], ["power", "lora"]],
+     "title_kw": [["power", "lora"]],
      "classes": ["Power Lora Loader (rgthree)"], "default": "6",
      "exclude_kw": ["distilled"]},
 
@@ -132,10 +144,15 @@ _CATALOG_BY_KEY = {f["key"]: f for f in VIDEO_FIELD_CATALOG}
 # Class types that mark a workflow as "video" (used to decide which detector
 # / which CSV template to offer in the UI).
 VIDEO_MARKER_CLASSES = {
-    "VHS_VideoCombine", "LTXVPreprocess", "LTXVScheduler",
-    "LTXVAudioVAELoader", "EmptyLTXVLatentVideo", "LTXVConditioning",
+    "VHS_VideoCombine", "SaveVideo", "CreateVideo",
+    "LTXVPreprocess", "LTXVScheduler", "LTXVAddGuide",
+    "LTXVAudioVAELoader", "LTXAVTextEncoderLoader",
+    "EmptyLTXVLatentVideo", "LTXVConditioning",
     "mxSlider", "mxSlider2D",
 }
+
+# Node classes that write the final video file (filename_prefix lives on them).
+VIDEO_SAVE_CLASSES = {"VHS_VideoCombine", "SaveVideo"}
 
 
 # --------------------------------------------------------------------------
@@ -172,8 +189,19 @@ def detect_video_mapping(template: dict[str, Any]) -> dict[str, dict[str, Any]]:
     mapping: dict[str, dict[str, Any]] = {}
     claimed: set[str] = set()
 
-    def claim(key: str, nid: str, field: str) -> None:
-        mapping[key] = {"node": str(nid), "field": field}
+    def field_for(spec: dict[str, Any], nid: str) -> str:
+        """Resolve the input field for a node — some specs map the same concept
+        to a different field per node class (e.g. seed -> RandomNoise.noise_seed)."""
+        cf = spec.get("class_fields")
+        if cf:
+            node = template.get(str(nid))
+            ct = node.get("class_type") if isinstance(node, dict) else None
+            if ct in cf:
+                return cf[ct]
+        return spec["field"]
+
+    def claim(key: str, nid: str, spec: dict[str, Any]) -> None:
+        mapping[key] = {"node": str(nid), "field": field_for(spec, nid)}
         claimed.add(str(nid))
 
     # Pass 1 — titles (skip nodes carrying an exclude keyword)
@@ -190,7 +218,7 @@ def detect_video_mapping(template: dict[str, Any]) -> dict[str, dict[str, Any]]:
             if any(w in title for w in excl):
                 continue
             if _title_matches(title, spec.get("title_kw") or []):
-                claim(spec["key"], nid, spec["field"])
+                claim(spec["key"], nid, spec)
                 break
 
     # Pass 2 — class_type
@@ -201,7 +229,7 @@ def detect_video_mapping(template: dict[str, Any]) -> dict[str, dict[str, Any]]:
             if not isinstance(node, dict) or str(nid) in claimed:
                 continue
             if node.get("class_type") in spec["classes"]:
-                claim(spec["key"], nid, spec["field"])
+                claim(spec["key"], nid, spec)
                 break
 
     # Pass 3 — legacy default node id, only if present and free
@@ -210,7 +238,7 @@ def detect_video_mapping(template: dict[str, Any]) -> dict[str, dict[str, Any]]:
             continue
         dflt = spec.get("default")
         if dflt and str(dflt) in template and str(dflt) not in claimed:
-            claim(spec["key"], dflt, spec["field"])
+            claim(spec["key"], dflt, spec)
 
     return mapping
 
@@ -291,10 +319,10 @@ def build_video_workflow(
         else:
             node_inputs[field] = val
 
-    # Save prefix: auto-target the VHS_VideoCombine node(s).
+    # Save prefix: auto-target the save node(s) — VHS_VideoCombine or SaveVideo.
     if save_prefix:
         for node in wf.values():
-            if isinstance(node, dict) and node.get("class_type") == "VHS_VideoCombine":
+            if isinstance(node, dict) and node.get("class_type") in VIDEO_SAVE_CLASSES:
                 node.setdefault("inputs", {})["filename_prefix"] = save_prefix
 
     # Advanced arbitrary patches "node_id.field" -> value

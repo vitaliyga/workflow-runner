@@ -60,6 +60,7 @@ from video_workflow_builder import (
     is_video_workflow,
     sample_csv_for,
     VIDEO_FIELD_CATALOG,
+    VIDEO_SAVE_CLASSES,
 )
 
 
@@ -1503,7 +1504,7 @@ async def create_video_run(
             "lora_name": j.load_loras_json[:60] + "..." if len(j.load_loras_json) > 60 else j.load_loras_json,
             "prompt_positive": j.prompt_positive,
             "input_image": j.input_image,
-            "input_images": [j.input_image] if j.input_image else [],
+            "input_images": [x for x in (j.input_image, j.input_image_last) if x],
             "seed": j.seed,
             "video_length_seconds": j.video_length_seconds,
             "video_width": j.video_width,
@@ -1618,13 +1619,17 @@ async def _video_handle(
 
     template, mapping = flows[(job.workflow or "").strip()]
 
-    # Upload input image
-    remote_image = ""
-    if job.input_image:
-        local_img = state.dir / "inputs" / job.input_image
+    # Upload input image(s). FLF2V flows use a second (last) frame.
+    async def _upload_ref(name: str) -> str:
+        if not name:
+            return ""
+        local_img = state.dir / "inputs" / name
         if not local_img.exists():
             raise FileNotFoundError(f"input image missing: {local_img}")
-        remote_image = await client.upload_image(local_img)
+        return await client.upload_image(local_img)
+
+    remote_image = await _upload_ref(job.input_image)
+    remote_image_last = await _upload_ref(job.input_image_last)
 
     day_tag = _run_day_tag(state.run_id)
     # Layout: <day>/<HHMMSS_workflow>/[<lora+strength>/]<girl>. HHMMSS groups
@@ -1641,6 +1646,7 @@ async def _video_handle(
     # are patched; everything else keeps the template default.
     values = {
         "input_image": remote_image,
+        "input_image_last": remote_image_last,
         "prompt_positive": job.prompt_positive,
         "prompt_negative": job.prompt_negative,
         "seed": job.seed,
@@ -1673,10 +1679,10 @@ async def _video_handle(
     out_dir = state.dir / "outputs" / Path(*rel_parts)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Save node = VHS_VideoCombine (detect its id from the template).
+    # Save node(s): VHS_VideoCombine or SaveVideo (detect ids from template).
     save_nodes = {
         nid for nid, n in template.items()
-        if isinstance(n, dict) and n.get("class_type") == "VHS_VideoCombine"
+        if isinstance(n, dict) and n.get("class_type") in VIDEO_SAVE_CLASSES
     } or {"61"}
     outputs = client.outputs_from_history(entry, save_nodes)
     if not outputs:

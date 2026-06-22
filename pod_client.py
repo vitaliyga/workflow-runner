@@ -107,32 +107,48 @@ class PodClient:
         keeps downloads aligned with the configured SaveImage/SaveVideo nodes
         instead of pulling every intermediate output from the graph.
 
-        Supports both image outputs ('images' key) and video outputs
-        ('gifs' / 'videos' keys) produced by VHS_VideoCombine and similar.
+        Supports image outputs ('images' key) and video outputs ('gifs' /
+        'videos' keys, VHS_VideoCombine). When `only_nodes` explicitly targets
+        save nodes, it is permissive: ANY list of dicts carrying 'filename' is
+        accepted (covers SaveVideo / CreateVideo, whose output key varies by
+        ComfyUI version). The untargeted case stays conservative (known keys
+        only) so intermediate previews aren't pulled.
         """
+        targeted = bool(only_nodes)
+        known_keys = ("images", "gifs", "videos")
         out: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+
+        def add(node_id: str, batch_idx: int, rec: dict[str, Any]) -> None:
+            fn = rec.get("filename")
+            if not fn:
+                return
+            dedup = (str(fn), str(rec.get("subfolder", "")))
+            if dedup in seen:
+                return
+            seen.add(dedup)
+            out.append({
+                "node_id": str(node_id),
+                "batch_index": str(batch_idx),
+                "filename": fn,
+                "subfolder": rec.get("subfolder", ""),
+                "type": rec.get("type", "output"),
+            })
+
         for node_id, node_out in entry.get("outputs", {}).items():
-            if only_nodes is not None and len(only_nodes) > 0 and node_id not in only_nodes:
+            if targeted and node_id not in only_nodes:
                 continue
-            # Images (SaveImage, PreviewImage, etc.)
-            for batch_idx, img in enumerate(node_out.get("images", [])):
-                out.append({
-                    "node_id": str(node_id),
-                    "batch_index": str(batch_idx),
-                    "filename": img["filename"],
-                    "subfolder": img.get("subfolder", ""),
-                    "type": img.get("type", "output"),
-                })
-            # Videos — VHS_VideoCombine returns under 'gifs' (legacy) or 'videos'
-            for key in ("gifs", "videos"):
-                for batch_idx, vid in enumerate(node_out.get(key, [])):
-                    if isinstance(vid, dict) and vid.get("filename"):
-                        out.append({
-                            "node_id": str(node_id),
-                            "batch_index": str(batch_idx),
-                            "filename": vid["filename"],
-                            "subfolder": vid.get("subfolder", ""),
-                            "type": vid.get("type", "output"),
-                        })
+            if not isinstance(node_out, dict):
+                continue
+            # Keys to scan: known ones always; everything else only when this
+            # node was explicitly targeted as a save node.
+            keys = list(node_out.keys()) if targeted else known_keys
+            for key in keys:
+                vals = node_out.get(key)
+                if not isinstance(vals, list):
+                    continue
+                for batch_idx, rec in enumerate(vals):
+                    if isinstance(rec, dict) and rec.get("filename"):
+                        add(node_id, batch_idx, rec)
         return out
 

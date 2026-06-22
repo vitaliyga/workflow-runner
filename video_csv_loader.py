@@ -2,7 +2,8 @@
 
 CSV columns (all optional except workflow):
   workflow              - workflow key (default: video_ltx)
-  input_image           - filename under inputs/ (for node 15)
+  input_image           - filename under inputs/ (first/only reference frame)
+  input_image_last      - 2nd reference frame (FLF2V flows: First+Last frame)
   prompt_positive       - positive text (node 28)
   prompt_negative       - negative text (node 29)
   seed                  - integer seed (node 125); empty/0/-1/'random' -> random per row
@@ -52,6 +53,7 @@ class VideoJob:
     scenario: str
     girl: str
     input_image: str
+    input_image_last: str          # 2nd reference frame for FLF2V flows (optional)
     prompt_positive: str
     prompt_negative: str
     seed: int
@@ -74,7 +76,7 @@ class VideoJob:
 
 _KNOWN = {
     "workflow", "scenario", "girl",
-    "input_image",
+    "input_image", "input_image_last",
     "prompt_positive", "prompt_negative",
     "seed",
     "video_length_seconds", "video_width", "video_height",
@@ -115,6 +117,7 @@ def load_video_jobs(path: Path) -> list[VideoJob]:
                 scenario=_f(row, "scenario"),
                 girl=_f(row, "girl"),
                 input_image=_f(row, "input_image", "").strip(),
+                input_image_last=_f(row, "input_image_last", "").strip(),
                 prompt_positive=_f(row, "prompt_positive"),
                 prompt_negative=_f(row, "prompt_negative"),
                 seed=_parse_seed(_f(row, "seed", "")),
