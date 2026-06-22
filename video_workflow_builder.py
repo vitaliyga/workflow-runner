@@ -378,5 +378,100 @@ def sample_csv_for(
     return buf.getvalue()
 
 
+# --------------------------------------------------------------------------
+# Universal mode: every editable node input becomes a CSV column, named by the
+# node's title (+ field if the node has several). No catalog needed — works
+# for any workflow. Connections ([node, idx]) and widget objects are skipped.
+# --------------------------------------------------------------------------
+_LOADIMAGE_CLASSES = {"LoadImage"}
+
+
+def _is_connection(v: Any) -> bool:
+    # ComfyUI wires look like ["12", 0] — a 2-item [node_id, output_index].
+    return (isinstance(v, list) and len(v) == 2
+            and isinstance(v[0], str) and isinstance(v[1], int))
+
+
+def _editable_value(v: Any) -> bool:
+    if _is_connection(v):
+        return False
+    if isinstance(v, dict):      # widget header objects, etc.
+        return False
+    return isinstance(v, (str, int, float, bool))
+
+
+def _cast_of(v: Any) -> str:
+    if isinstance(v, bool):
+        return "str"
+    if isinstance(v, int):
+        return "int"
+    if isinstance(v, float):
+        return "float"
+    return "str"
+
+
+def full_columns(template: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every editable input of every node as a universal column.
+
+    Returns ordered list of {label, node, field, cast, image, value}. Label =
+    node title (+ '.<field>' when the node has >1 editable field); duplicate
+    labels get a '#<node_id>' suffix so they stay unique. `image` marks
+    LoadImage.image fields (the runner uploads such values as files).
+    """
+    raw: list[tuple[str, str, Any, str, str]] = []
+    for nid, node in template.items():
+        if not isinstance(node, dict):
+            continue
+        ct = str(node.get("class_type") or "")
+        title = str((node.get("_meta") or {}).get("title") or ct or nid)
+        for field, v in (node.get("inputs") or {}).items():
+            if _editable_value(v):
+                raw.append((str(nid), str(field), v, ct, title))
+
+    per_node: dict[str, int] = {}
+    for nid, *_ in raw:
+        per_node[nid] = per_node.get(nid, 0) + 1
+
+    bases = [
+        (nid, field, v, ct, (title if per_node[nid] == 1 else f"{title}.{field}"))
+        for (nid, field, v, ct, title) in raw
+    ]
+    base_counts: dict[str, int] = {}
+    for *_, base in bases:
+        base_counts[base] = base_counts.get(base, 0) + 1
+
+    cols: list[dict[str, Any]] = []
+    for nid, field, v, ct, base in bases:
+        label = base if base_counts[base] == 1 else f"{base}#{nid}"
+        cols.append({
+            "label": label, "node": nid, "field": field,
+            "cast": _cast_of(v), "value": v,
+            "image": ct in _LOADIMAGE_CLASSES and field == "image",
+        })
+    # stable order: numeric node id, then field
+    cols.sort(key=lambda c: (int(c["node"]) if c["node"].isdigit() else 1 << 30, c["field"]))
+    return cols
+
+
+def universal_sample_csv(template: dict[str, Any], workflow_key: str) -> str:
+    """One-row sample CSV with EVERY editable input as a column (title-based),
+    pre-filled with the template's current values. The user trims to taste."""
+    cols = full_columns(template)
+    header = ["workflow", "scenario", "girl"] + [c["label"] for c in cols]
+    row = ["", "scene_01", "ModelName"]
+    row[0] = workflow_key
+    for c in cols:
+        v = c["value"]
+        row.append("" if v is None else str(v))
+
+    import csv as _csv
+    import io
+    buf = io.StringIO()
+    w = _csv.writer(buf)
+    w.writerow(header)
+    w.writerow(row)
+    return buf.getvalue()
+
+
 def load_video_template(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text())

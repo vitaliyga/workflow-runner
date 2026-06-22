@@ -59,6 +59,8 @@ from video_workflow_builder import (
     default_video_mapping,
     is_video_workflow,
     sample_csv_for,
+    full_columns,
+    universal_sample_csv,
     VIDEO_FIELD_CATALOG,
     VIDEO_SAVE_CLASSES,
 )
@@ -835,6 +837,31 @@ async def workflow_sample_csv(name: str) -> StreamingResponse:
         iter([csv_text]),
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="{key}_sample.csv"'},
+    )
+
+
+@app.get("/api/workflows/{name}/universal_csv", dependencies=[Depends(auth_dep)])
+async def workflow_universal_csv(name: str) -> StreamingResponse:
+    """Universal sample CSV: EVERY editable node input as a title-based column,
+    pre-filled with current values. Works for any registered video flow; the
+    user trims to the columns they actually vary."""
+    key = Path(name).name
+    if key.endswith(".json"):
+        key = key[:-5]
+    cfg = load_config()
+    registered = (cfg.get("workflows") or {}).get("workflows") or {}
+    spec = registered.get(key)
+    if not spec or not spec.get("is_video"):
+        raise HTTPException(404, f"video flow '{key}' not registered")
+    tmpl_path = _resolve_workflow_template_path(str(spec.get("template") or ""))
+    if not tmpl_path.exists():
+        raise HTTPException(404, f"template missing: {tmpl_path.name}")
+    template = json.loads(tmpl_path.read_text())
+    csv_text = universal_sample_csv(template, key)
+    return StreamingResponse(
+        iter([csv_text]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{key}_universal.csv"'},
     )
 
 
@@ -1682,8 +1709,23 @@ async def _video_handle(
         "load_distilled_lora_json": job.load_distilled_lora_json,
         "load_distilled_lora_final_json": job.load_distilled_lora_final_json,
     }
+    # Universal columns: any CSV column matching a title-based label (from
+    # full_columns) is translated to a raw <node>.<field> patch; image columns
+    # are uploaded first. Numeric <node>.<field> columns pass through untouched.
+    extra_patches = dict(job.extra or {})
+    cols = {c["label"]: c for c in full_columns(template)}
+    for label in list(extra_patches.keys()):
+        spec = cols.get(label)
+        if not spec:
+            continue
+        raw = str(extra_patches.pop(label) or "").strip()
+        if not raw:
+            continue
+        key = f'{spec["node"]}.{spec["field"]}'
+        extra_patches[key] = await _upload_ref(raw) if spec["image"] else raw
+
     wf = build_video_workflow(template, values, mapping,
-                              save_prefix=prefix, extra=job.extra)
+                              save_prefix=prefix, extra=extra_patches)
 
     log.info("[%s] submit video job %d girl=%s seed=%d",
              client.cfg.name, idx, job.girl, job.seed)

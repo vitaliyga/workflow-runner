@@ -389,6 +389,11 @@ function selectFlow(name) {
   $("#wf-select").value = name;
   $("#btn-sample-csv").setAttribute(
     "href", `/api/workflows/${encodeURIComponent(name)}/sample_csv`);
+  const uni = $("#btn-universal-csv");
+  if (uni) {
+    uni.setAttribute("href", `/api/workflows/${encodeURIComponent(name)}/universal_csv`);
+    uni.style.display = "";
+  }
   $("#cols-title").textContent = `Колонки CSV — ${name}`;
   const grid = $("#cols-grid");
   grid.innerHTML = "";
