@@ -1743,8 +1743,13 @@ async def _video_handle(
         raw = str(extra_patches.pop(label) or "").strip()
         if not raw:
             continue
-        key = f'{spec["node"]}.{spec["field"]}'
-        extra_patches[key] = await _upload_ref(raw) if spec["image"] else raw
+        if spec["image"]:
+            extra_patches[f'{spec["node"]}.{spec["field"]}'] = await _upload_ref(raw)
+        elif spec.get("dual"):                       # mxSlider — write both Xi & Xf
+            extra_patches[f'{spec["node"]}.Xi'] = raw
+            extra_patches[f'{spec["node"]}.Xf'] = raw
+        else:
+            extra_patches[f'{spec["node"]}.{spec["field"]}'] = raw
 
     wf = build_video_workflow(template, values, mapping,
                               save_prefix=prefix, extra=extra_patches)

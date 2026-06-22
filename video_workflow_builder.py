@@ -384,6 +384,10 @@ def sample_csv_for(
 # for any workflow. Connections ([node, idx]) and widget objects are skipped.
 # --------------------------------------------------------------------------
 _LOADIMAGE_CLASSES = {"LoadImage"}
+# Utility/housekeeping nodes — no per-job-meaningful inputs.
+_SKIP_CLASSES = VIDEO_SAVE_CLASSES | {
+    "RAMCleanup", "VRAMCleanup", "VRAM_Debug", "ImpactDummyInput",
+}
 
 
 def _is_connection(v: Any) -> bool:
@@ -400,6 +404,17 @@ def _editable_value(v: Any) -> bool:
     return isinstance(v, (str, int, float, bool))
 
 
+def _skip_field(field: str) -> bool:
+    """Structural junk fields, independent of node type:
+    - 'isfloatX' — mxSlider's int/float toggle (collapsed into one column);
+    - widget buttons whose key starts with a non-word char (e.g. rgthree's
+      '➕ Add Lora')."""
+    if field == "isfloatX":
+        return True
+    first = field[:1]
+    return bool(first) and not (first.isalnum() or first == "_")
+
+
 def _cast_of(v: Any) -> str:
     if isinstance(v, bool):
         return "str"
@@ -411,48 +426,55 @@ def _cast_of(v: Any) -> str:
 
 
 def full_columns(template: dict[str, Any]) -> list[dict[str, Any]]:
-    """Every editable input of every node as a universal column.
+    """Editable inputs of every node as universal columns (title-based).
 
-    Returns ordered list of {label, node, field, cast, image, value}. Label =
-    node title (+ '.<field>' when the node has >1 editable field); duplicate
-    labels get a '#<node_id>' suffix so they stay unique. `image` marks
-    LoadImage.image fields (the runner uploads such values as files).
-    """
-    raw: list[tuple[str, str, Any, str, str]] = []
+    Returns ordered list of {label, node, field, cast, image, dual, value}.
+    Structural cleanup (no node-name hardcoding):
+    - mxSlider-style nodes (have both ``Xi`` and ``Xf``) collapse into ONE
+      column (``dual=True``) that writes both; ``isfloatX`` dropped;
+    - widget-button keys ('➕ …') and connections/dicts skipped;
+    - save/cleanup/debug nodes skipped entirely.
+    Label = node title (+ '.<field>' if the node yields >1 column); duplicate
+    labels get a '#<node_id>' suffix. ``image`` marks LoadImage.image (uploaded
+    as a file); ``dual`` marks sliders (runtime writes Xi & Xf)."""
+    items: list[dict[str, Any]] = []
     for nid, node in template.items():
         if not isinstance(node, dict):
             continue
         ct = str(node.get("class_type") or "")
-        # Save nodes' filename_prefix/codec/format are runner-controlled — skip
-        # to keep the universal column list clean.
-        if ct in VIDEO_SAVE_CLASSES:
+        if ct in _SKIP_CLASSES:
             continue
         title = str((node.get("_meta") or {}).get("title") or ct or nid)
-        for field, v in (node.get("inputs") or {}).items():
-            if _editable_value(v):
-                raw.append((str(nid), str(field), v, ct, title))
+        ins = node.get("inputs") or {}
+        # mxSlider family: one logical control split across Xi/Xf/isfloatX.
+        if _editable_value(ins.get("Xi")) and "Xf" in ins:
+            items.append({"node": str(nid), "field": "Xi", "value": ins.get("Xi"),
+                          "cls": ct, "title": title, "dual": True})
+            continue
+        for field, v in ins.items():
+            field = str(field)
+            if _editable_value(v) and not _skip_field(field):
+                items.append({"node": str(nid), "field": field, "value": v,
+                              "cls": ct, "title": title, "dual": False})
 
     per_node: dict[str, int] = {}
-    for nid, *_ in raw:
-        per_node[nid] = per_node.get(nid, 0) + 1
-
-    bases = [
-        (nid, field, v, ct, (title if per_node[nid] == 1 else f"{title}.{field}"))
-        for (nid, field, v, ct, title) in raw
-    ]
+    for it in items:
+        per_node[it["node"]] = per_node.get(it["node"], 0) + 1
+    for it in items:
+        it["base"] = it["title"] if per_node[it["node"]] == 1 else f'{it["title"]}.{it["field"]}'
     base_counts: dict[str, int] = {}
-    for *_, base in bases:
-        base_counts[base] = base_counts.get(base, 0) + 1
+    for it in items:
+        base_counts[it["base"]] = base_counts.get(it["base"], 0) + 1
 
     cols: list[dict[str, Any]] = []
-    for nid, field, v, ct, base in bases:
-        label = base if base_counts[base] == 1 else f"{base}#{nid}"
+    for it in items:
+        label = it["base"] if base_counts[it["base"]] == 1 else f'{it["base"]}#{it["node"]}'
         cols.append({
-            "label": label, "node": nid, "field": field,
-            "cast": _cast_of(v), "value": v,
-            "image": ct in _LOADIMAGE_CLASSES and field == "image",
+            "label": label, "node": it["node"], "field": it["field"],
+            "cast": _cast_of(it["value"]), "value": it["value"],
+            "image": it["cls"] in _LOADIMAGE_CLASSES and it["field"] == "image",
+            "dual": it["dual"],
         })
-    # stable order: numeric node id, then field
     cols.sort(key=lambda c: (int(c["node"]) if c["node"].isdigit() else 1 << 30, c["field"]))
     return cols
 
