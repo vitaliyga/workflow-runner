@@ -858,8 +858,20 @@ async def workflow_sample_csv(name: str) -> StreamingResponse:
     return StreamingResponse(
         iter([csv_text]),
         media_type="text/csv",
-        headers={"Content-Disposition": f'attachment; filename="{key}_sample.csv"'},
+        headers=_attachment_headers(f"{key}_sample.csv"),
     )
+
+
+def _attachment_headers(filename: str) -> dict[str, str]:
+    """Content-Disposition safe for non-ASCII names. HTTP headers are latin-1,
+    so a Cyrillic/emoji flow name in `filename` would crash with
+    UnicodeEncodeError (500). ASCII fallback + RFC 5987 filename* for the real
+    unicode name."""
+    import urllib.parse
+    ascii_name = filename.encode("ascii", "ignore").decode().strip() or "download.csv"
+    quoted = urllib.parse.quote(filename)
+    return {"Content-Disposition":
+            f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quoted}"}
 
 
 @app.get("/api/workflows/{name}/universal_csv", dependencies=[Depends(auth_dep)])
@@ -883,7 +895,7 @@ async def workflow_universal_csv(name: str) -> StreamingResponse:
     return StreamingResponse(
         iter([csv_text]),
         media_type="text/csv",
-        headers={"Content-Disposition": f'attachment; filename="{key}_universal.csv"'},
+        headers=_attachment_headers(f"{key}_universal.csv"),
     )
 
 
