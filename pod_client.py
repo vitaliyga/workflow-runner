@@ -67,12 +67,26 @@ class PodClient:
             body = await r.json()
         return body["prompt_id"]
 
+    async def interrupt(self) -> None:
+        """Tell ComfyUI to abort the currently-executing prompt (best-effort)."""
+        try:
+            async with self.session.post(f"{self.cfg.url}/interrupt",
+                                         headers=self._headers) as r:
+                await r.read()
+        except Exception:
+            pass
+
     async def wait(self, prompt_id: str, poll_interval: float = 2.0,
-                   timeout: float = 600.0) -> dict[str, Any]:
-        """Polls /history/<id> until the prompt finishes. Returns the history entry."""
+                   timeout: float = 600.0, should_cancel=None) -> dict[str, Any]:
+        """Polls /history/<id> until the prompt finishes. Returns the history entry.
+
+        If `should_cancel()` returns true, stops waiting early (caller должен был
+        отправить /interrupt, чтобы реально прервать генерацию)."""
         deadline = asyncio.get_event_loop().time() + timeout
         url = f"{self.cfg.url}/history/{prompt_id}"
         while True:
+            if should_cancel and should_cancel():
+                raise PodError(f"prompt {prompt_id} cancelled")
             async with self.session.get(url, headers=self._headers) as r:
                 body = await r.json() if r.status == 200 else {}
             entry = body.get(prompt_id)

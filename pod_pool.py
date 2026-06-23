@@ -58,6 +58,8 @@ class PodPool:
         self.max_attempts = max_attempts
         self.dry_run = dry_run
         self.s3 = s3
+        # Set by the web layer to a () -> bool that reports run cancellation.
+        self.cancelled_check = lambda: False
         self.queue: asyncio.Queue[JobItem | None] = asyncio.Queue()
         # cache of (pod_name, image_path) -> remote filename to skip re-upload
         self._upload_cache: dict[tuple[str, str], str] = {}
@@ -103,6 +105,9 @@ class PodPool:
             if item is None:
                 self.queue.task_done()
                 return
+            if self.cancelled_check():
+                self.queue.task_done()
+                continue
             try:
                 if self.dry_run:
                     await self._handle_dry(name, item)
@@ -163,7 +168,7 @@ class PodPool:
         log.info("[%s] submit job %d wf=%s girl=%s lora=%s",
                  client.cfg.name, item.idx, job.workflow, job.girl, job.lora_name)
         prompt_id = await client.submit(wf)
-        entry = await client.wait(prompt_id)
+        entry = await client.wait(prompt_id, should_cancel=self.cancelled_check)
 
         out_dir = output_dir(self.outputs_dir, job, self.day_tag, self.run_tag)
         out_dir.mkdir(parents=True, exist_ok=True)

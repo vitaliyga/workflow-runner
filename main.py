@@ -422,6 +422,7 @@ class WebPool(PodPool):
     def __init__(self, *, state: RunState, **kwargs: Any):
         super().__init__(**kwargs)
         self.state = state
+        self.cancelled_check = lambda: self.state.cancelled
 
     async def _handle(self, client, item):  # type: ignore[override]
         idx = item.idx
@@ -450,6 +451,11 @@ class WebPool(PodPool):
             if item is None:
                 self.queue.task_done()
                 return
+            if self.state.cancelled:
+                # run cancelled — don't start new jobs; mark this one cancelled
+                await self._set_status(item.idx, "failed", error="cancelled")
+                self.queue.task_done()
+                continue
             try:
                 if self.dry_run:
                     await self._handle_dry(name, item)
@@ -457,7 +463,7 @@ class WebPool(PodPool):
                     await self._handle(client, item)
             except Exception as e:
                 item.attempts += 1
-                if item.attempts < self.max_attempts:
+                if item.attempts < self.max_attempts and not self.state.cancelled:
                     await self.queue.put(item)
                 else:
                     await self._set_status(item.idx, "failed",
@@ -1490,16 +1496,30 @@ async def delete_run(run_id: str) -> dict[str, Any]:
 async def cancel_run(run_id: str) -> dict[str, Any]:
     state = get_run(run_id)
     state.cancelled = True
-    # Drop from the queue if it was waiting (or being processed).
+    # Drop from the queue if it was waiting.
     if run_id in RUN_QUEUE:
         RUN_QUEUE.remove(run_id)
     await state.emit("run_cancelled")
-    # The PodPool doesn't currently look at this flag — we leave proper
-    # cancellation to a follow-up commit. For now mark pending → cancelled.
+    # Mark not-yet-finished jobs as cancelled (running ones get aborted below).
     for j in state.jobs:
-        if j["status"] == "pending":
+        if j["status"] in ("pending", "running"):
             j["status"] = "failed"
             j["error"] = "cancelled"
+    # Abort the in-flight generation on the pod(s) — /interrupt stops ComfyUI's
+    # current prompt now; the worker's wait() also bails on the cancelled flag.
+    import aiohttp
+    cfg = load_config()
+    for p in (cfg.get("pods") or []):
+        url = (p.get("url") or "").rstrip("/")
+        if not url:
+            continue
+        headers = {"Authorization": f"Bearer {p['api_key']}"} if p.get("api_key") else {}
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as s:
+                async with s.post(f"{url}/interrupt", headers=headers) as r:
+                    await r.read()
+        except Exception as e:
+            log.warning("interrupt %s failed: %s", url, e)
     await state.persist()
     return {"ok": True}
 
@@ -1669,6 +1689,10 @@ async def _video_worker(
             queue.task_done()
             return
         idx, job = item
+        if state.cancelled:
+            await _video_set_status(state, idx, "failed", error="cancelled")
+            queue.task_done()
+            continue
         attempts = 0
         while attempts < max_attempts:
             try:
@@ -1678,9 +1702,10 @@ async def _video_worker(
                 attempts += 1
                 log.warning("[%s] video job %d failed (attempt %d): %s",
                             client.cfg.name, idx, attempts, e)
-                if attempts >= max_attempts:
+                if attempts >= max_attempts or state.cancelled:
                     await _video_set_status(state, idx, "failed",
                                             error=f"{type(e).__name__}: {e}")
+                    break
         queue.task_done()
 
 
@@ -1772,7 +1797,8 @@ async def _video_handle(
     # Video generation (esp. long clips / 22B models) easily exceeds the 600s
     # image default → раннер ложно помечал failed. 30 min, env-tunable.
     wait_timeout = float(os.environ.get("VIDEO_WAIT_TIMEOUT_S", "1800"))
-    entry = await client.wait(prompt_id, timeout=wait_timeout)
+    entry = await client.wait(prompt_id, timeout=wait_timeout,
+                              should_cancel=lambda: state.cancelled)
 
     # Download all outputs (video files). Top-level folder = run date (DD-MM),
     # then the previous per-job layout. This propagates everywhere rel paths
