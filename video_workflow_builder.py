@@ -416,6 +416,8 @@ def _skip_field(field: str) -> bool:
 
 
 def _cast_of(v: Any) -> str:
+    if isinstance(v, (dict, list)):
+        return "json"
     if isinstance(v, bool):
         return "str"
     if isinstance(v, int):
@@ -423,6 +425,14 @@ def _cast_of(v: Any) -> str:
     if isinstance(v, float):
         return "float"
     return "str"
+
+
+def _is_lora_slot(field: str, v: Any) -> bool:
+    """A Power Lora Loader (rgthree) slot: key like 'lora_3' holding a dict
+    {on, lora, strength}. These are editable but stored as dicts (so the plain
+    scalar filter skips them) — surface them as JSON columns instead."""
+    return (field.startswith("lora_") and field[len("lora_"):].isdigit()
+            and isinstance(v, dict))
 
 
 def full_columns(template: dict[str, Any]) -> list[dict[str, Any]]:
@@ -453,7 +463,10 @@ def full_columns(template: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         for field, v in ins.items():
             field = str(field)
-            if _editable_value(v) and not _skip_field(field):
+            if _skip_field(field):
+                continue
+            # Power Lora Loader slots are dicts → expose as JSON columns.
+            if _is_lora_slot(field, v) or _editable_value(v):
                 items.append({"node": str(nid), "field": field, "value": v,
                               "cls": ct, "title": title, "dual": False})
 
@@ -494,7 +507,10 @@ def universal_sample_csv(template: dict[str, Any], workflow_key: str,
     row[0] = workflow_key
     for c in cols:
         v = c["value"]
-        row.append("" if v is None else str(v))
+        if isinstance(v, (dict, list)):
+            row.append(json.dumps(v, ensure_ascii=False))
+        else:
+            row.append("" if v is None else str(v))
 
     import csv as _csv
     import io
