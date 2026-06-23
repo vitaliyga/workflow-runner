@@ -1769,7 +1769,10 @@ async def _video_handle(
     log.info("[%s] submit video job %d girl=%s seed=%d",
              client.cfg.name, idx, job.girl, job.seed)
     prompt_id = await client.submit(wf)
-    entry = await client.wait(prompt_id)
+    # Video generation (esp. long clips / 22B models) easily exceeds the 600s
+    # image default → раннер ложно помечал failed. 30 min, env-tunable.
+    wait_timeout = float(os.environ.get("VIDEO_WAIT_TIMEOUT_S", "1800"))
+    entry = await client.wait(prompt_id, timeout=wait_timeout)
 
     # Download all outputs (video files). Top-level folder = run date (DD-MM),
     # then the previous per-job layout. This propagates everywhere rel paths
