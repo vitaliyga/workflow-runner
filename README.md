@@ -11,10 +11,69 @@
 - запускать отдельные video-прогоны на странице `/video`;
 - регистрировать workflow JSON из `jobs/` и хранить mapping в
   `storage/config.yaml`;
-- запускать несколько pod'ов параллельно;
-- сохранять результаты и thumbnails в `storage/runs/<run_id>/`;
+- запускать несколько pod'ов параллельно через общую последовательную очередь;
+- реально отменять генерацию (стоп воркеров + `/interrupt` в ComfyUI);
+- сохранять результаты и thumbnails в `storage/runs/<run_id>/`, зеркалить в S3;
+- отдавать «универсальный» CSV со всеми входами нод (включая lora-слоты Power
+  Lora Loader как JSON) — `universal_csv`;
 - поддерживать строки с несколькими фото одной персоны через
   `input_images` в Builder и CSV.
+
+## Агенту: как гонять раннер по API
+
+Раннер сам делает весь конвейер ComfyUI (upload кадров → патч графа → submit →
+ожидание `/history` → скачивание результата). Агент **не должен** дёргать
+ComfyUI `/prompt` напрямую — только REST раннера. Базовый URL = адрес раннера
+(на RunPod это внешний proxy-порт, см. ниже), при заданном `WEB_ADMIN_TOKEN`
+добавляй `Authorization: Bearer <token>`.
+
+Полная эмуляция video-CSV (проверено end-to-end):
+
+```bash
+R=https://<pod>-8085.proxy.runpod.net          # URL раннера, не ComfyUI
+
+# 1. убедиться, что флоу зарегистрирован (Settings → ⚙ CSV-поля → Register)
+curl -s "$R/api/workflows" | jq '.[] | {name, type}'
+
+# 2. получить шаблон CSV. universal_csv = все входы нод (колонки <title>[.field]).
+#    Минимальный CSV безопаснее full-dump: берёшь только нужные колонки,
+#    остальное держит дефолт шаблона (full-dump может попортить bool: True→"True").
+curl -s "$R/api/workflows/<key>/universal_csv" -o sample.csv
+
+# 3. одна строка: workflow + girl + только меняемые колонки (напр. 4 кадра)
+printf 'workflow,girl,Загрузить изображение,Load Last Frame,Load KF 1/3,Load KF 2/3\n<key>,test,a.png,b.png,a.png,b.png\n' > job.csv
+
+# 4. создать video-прогон (csv + фото). Фото с тем же именем, что в колонках.
+curl -s -X POST "$R/api/video-runs" \
+     -F 'csv_file=@job.csv;type=text/csv' \
+     -F 'photos=@a.png' -F 'photos=@b.png'        # → {"run_id": "...", "missing_inputs": []}
+
+# 5. старт (ставит в общую последовательную очередь)
+curl -s -X POST "$R/api/video-runs/<run_id>/start"   # → {"ok": true}
+
+# 6. опрос статуса (НЕ ComfyUI /history — его проксирует 403)
+curl -s "$R/api/runs/<run_id>/status" | jq '.jobs[0] | {status, duration, files, error, extra}'
+```
+
+`status` доходит до `done`, `files[0]` = путь результата по схеме
+`<ДД-ММ>/<HHMMSS_workflow>/<girl>[/params]/<girl>_<idx>_seed<seed>_…`.
+Image-прогон идентичен, только `POST /api/runs` вместо `/api/video-runs`.
+
+> **Картиночные колонки** грузятся автоматически: значение ячейки = имя файла,
+> залитого с прогоном. «Дружелюбные» поля (`input_image`, `input_image_last`,
+> `seed`, …) и универсальные колонки `<title>` можно мешать. Power Lora Loader
+> отдаётся как JSON-ячейка `{"on":true,"lora":"…","strength":0.5}`.
+
+### RunPod: подводные камни (важно для агентов)
+
+- **Раннер = внутренний порт `8766`**, ComfyUI = внутренний `:8083`/`:8188`.
+  nginx на поде фронтит внешние proxy-порты (`8082` ComfyUI, `8085` раннер, …).
+- **Никогда** не поднимай раннер с `WEB_PORT=8085` — это порт nginx, заберёшь
+  его → лягут все внешние порты пода. Рестарт раннера = убить процесс на `:8766`,
+  **не** `pkill main.py` (убьёт ComfyUI).
+- ComfyUI `/history` снаружи через proxy отдаёт **403** — внешний наблюдатель
+  не прочитает результат напрямую. Поэтому статус смотри через раннер
+  (`/api/runs/{id}/status`), а сам раннер должен ходить в ComfyUI изнутри пода.
 
 ## Переменные окружения
 
@@ -27,6 +86,7 @@
 | `WEB_PORT` | порт веб-интерфейса, по умолчанию `8766` |
 | `WEB_ADMIN_TOKEN` | bearer-token для защиты `/api/*` |
 | `LOG_LEVEL` | уровень логов, по умолчанию `info` |
+| `VIDEO_WAIT_TIMEOUT_S` | сколько ждать готовности video-промта в ComfyUI, по умолчанию `1800` (30 мин) |
 | `S3_BUCKET` | bucket для зеркалирования результатов |
 | `S3_PREFIX` | prefix внутри bucket, по умолчанию `test/runner/` |
 | `S3_REGION` | регион S3/R2, по умолчанию `us-east-1` |
@@ -231,14 +291,24 @@ jobs/                  # шаблоны workflow JSON (читаются по п�
 | `GET /api/config` | прочитать активный конфиг (pods + workflows + s3) |
 | `PUT /api/config` | сохранить конфиг |
 | `POST /api/pods/test` | пинг pod'а + диагностика missing-нод |
-| `POST /api/runs` | создать прогон (multipart: csv_file + photos[]) |
-| `POST /api/runs/{id}/start` | запустить |
-| `POST /api/runs/{id}/cancel` | пометить pending как failed |
-| `GET /api/runs/{id}/status` | снимок состояния |
+| `GET /api/workflows` | список зарегистрированных флоу (с типом image/video) |
+| `POST /api/workflows/upload` | загрузить workflow JSON в `jobs/` |
+| `GET /api/workflows/{name}/detect` | автодетект CSV-полей (для UI ⚙ CSV-поля) |
+| `POST /api/workflows/{name}/register` | сохранить маппинг полей в config |
+| `GET /api/workflows/{name}/sample_csv` | пример CSV по выбранным «дружелюбным» полям |
+| `GET /api/workflows/{name}/universal_csv` | пример CSV со **всеми** редактируемыми входами нод (колонки `<title>[.field]`, lora-слоты — JSON) |
+| `POST /api/runs` | создать **image**-прогон (multipart: `csv_file` + `photos[]`) |
+| `POST /api/video-runs` | создать **video**-прогон (multipart: `csv_file` + `photos[]`) |
+| `POST /api/runs/{id}/inputs` | дозалить фото в существующий прогон |
+| `POST /api/runs/{id}/start` / `POST /api/video-runs/{id}/start` | поставить в общую очередь и запустить |
+| `POST /api/runs/{id}/cancel` | реальная отмена: стоп воркеров + `/interrupt` в ComfyUI, pending/running → failed |
+| `GET /api/runs/{id}/status` | снимок состояния (включая `jobs[].files`, `duration`, `seed`, `extra`) |
 | `GET /api/runs/{id}/events` | SSE-стрим обновлений |
 | `GET /api/runs/{id}/file/output/{path}` | отдать сгенерированный файл |
 | `GET /api/runs/{id}/file/thumb/{path}` | превью 256px |
+| `GET /api/runs/{id}/archive` / `GET /api/video-runs/{id}/archive` | zip всего прогона |
 | `GET /api/runs` | список прошлых прогонов |
+| `DELETE /api/runs/{id}` | удалить прогон |
 | `POST /api/scenarios/expand` | YAML/JSON → плоский CSV |
 
 ## Auth
@@ -253,9 +323,6 @@ localStorage.setItem("admin_token", "your-token");
 
 ## Что осталось доделать (Phase 2)
 
-- **Cancel** сейчас только помечает pending как failed; в `PodPool` нет
-  кооперативной отмены running-заданий. Нужно добавить `asyncio.Event`
-  и проверку в `_worker`.
 - **History clean** — нет UI для удаления прошлых runs.
 - **Retry failed only** — кнопка перезапуска только упавших.
 - **Workflow upload** — сейчас JSON-файлы в `jobs/` правятся только на
