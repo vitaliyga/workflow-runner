@@ -681,7 +681,7 @@ def _autodetect_mapping(wf: dict[str, Any]) -> dict[str, Any]:
         return out
 
     out: dict[str, Any] = {}
-    ks = first_of("KSampler", "KSamplerAdvanced", "SamplerCustomAdvanced")
+    ks = first_of("KSampler", "KSamplerAdvanced", "KSamplerWithNAG", "SamplerCustomAdvanced")
     if ks:
         out["ksampler"] = {"node": ks}
 
