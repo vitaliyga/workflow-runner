@@ -702,6 +702,22 @@ def _autodetect_mapping(wf: dict[str, Any]) -> dict[str, Any]:
                    clips[-1])
         out["negative_prompt"] = {"node": neg}
 
+    # Flows without CLIPTextEncode (e.g. Krea2 edit) keep the prompt as a
+    # literal `prompt` string on the encode nodes. Positive = first non-empty,
+    # negative = the remaining one (these graphs feed KSampler's negative from
+    # the empty encode).
+    if "positive_prompt" not in out:
+        prompts = [nid for nid, n in wf.items()
+                   if isinstance(n, dict)
+                   and isinstance((n.get("inputs") or {}).get("prompt"), str)]
+        if prompts:
+            pos = next((nid for nid in prompts if wf[nid]["inputs"]["prompt"].strip()),
+                       prompts[0])
+            out["positive_prompt"] = {"node": pos, "field": "prompt"}
+            rest = [nid for nid in prompts if nid != pos]
+            if rest:
+                out["negative_prompt"] = {"node": rest[-1], "field": "prompt"}
+
     lis = all_of("LoadImage")
     if lis:
         out["load_images"] = {"main": {"node": lis[0]}}
