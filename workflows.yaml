@@ -17,3 +17,27 @@ defaults:
 workflows:
   sample_image_v1:
     template: jobs/sample_image_v1.json
+
+  # Krea2 Edit (BigLove) — img2img/edit stage. Grounded-encode prompts live in
+  # an `inputs.prompt` string (no CLIPTextEncode). Needs the comfyui-krea2edit
+  # nodes + BigLoveKreaEdit1_bf16 / qwen3vl_4b / qwen_image_vae on the pod.
+  krea2_regina_1:
+    template: jobs/krea2_regina_1.json
+    ksampler: { node: "53" }
+    positive_prompt: { node: "84", field: prompt }
+    negative_prompt: { node: "85", field: prompt }
+    load_images:
+      main: { node: "93" }
+    save_images: ["29"]
+    lora_loaders: []
+
+  # Krea2 (BigLove) — txt2img generate stage. No input image
+  # (EmptySD3LatentImage), so load_images is intentionally empty.
+  krea2_regina_2:
+    template: jobs/krea2_regina_2.json
+    ksampler: { node: "193" }
+    positive_prompt: { node: "211" }
+    negative_prompt: { node: "299" }
+    load_images: {}
+    save_images: ["9"]
+    lora_loaders: []

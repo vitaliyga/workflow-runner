@@ -196,14 +196,22 @@ def build_workflow(template: dict[str, Any], mapping: WorkflowMapping,
     image_roles.sort(key=lambda item: item[0] != "main")
     images = tuple(img for img in (params.input_images or (params.input_image,)) if img)
     if not image_roles:
-        raise KeyError(f"workflow {mapping.name}: load_images not configured")
-    if len(images) != len(image_roles):
-        raise ValueError(
-            f"workflow {mapping.name}: input image count ({len(images)}) "
-            f"does not match load_images roles ({len(image_roles)})"
-        )
-    for (role, ref), img in zip(image_roles, images):
-        set_field(ref.node, ref.field, img)
+        # txt2img / no-input flow (e.g. an EmptySD3LatentImage graph with no
+        # LoadImage node): nothing to assign. Only complain if the row still
+        # carried images that have nowhere to go.
+        if images:
+            raise ValueError(
+                f"workflow {mapping.name}: {len(images)} input image(s) supplied "
+                f"but load_images has no roles configured"
+            )
+    else:
+        if len(images) != len(image_roles):
+            raise ValueError(
+                f"workflow {mapping.name}: input image count ({len(images)}) "
+                f"does not match load_images roles ({len(image_roles)})"
+            )
+        for (role, ref), img in zip(image_roles, images):
+            set_field(ref.node, ref.field, img)
 
     # LoRA — patch the first loader. Multi-LoRA stack: extend JobParams to a
     # list and iterate here.

@@ -1,0 +1,128 @@
+{
+  "9": {
+    "inputs": {
+      "filename_prefix": "KreaEdit1_",
+      "images": [
+        "194",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save Image"
+    }
+  },
+  "193": {
+    "inputs": {
+      "seed": 204230537030474,
+      "steps": 8,
+      "cfg": 1,
+      "sampler_name": "er_sde",
+      "scheduler": "beta",
+      "denoise": 1,
+      "model": [
+        "275",
+        0
+      ],
+      "positive": [
+        "211",
+        0
+      ],
+      "negative": [
+        "299",
+        0
+      ],
+      "latent_image": [
+        "210",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "KSampler"
+    }
+  },
+  "194": {
+    "inputs": {
+      "samples": [
+        "193",
+        0
+      ],
+      "vae": [
+        "200",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode"
+    }
+  },
+  "200": {
+    "inputs": {
+      "vae_name": "qwen_image_vae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Load VAE"
+    }
+  },
+  "201": {
+    "inputs": {
+      "clip_name": "qwen3vl_4b_bf16.safetensors",
+      "type": "krea2",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "Load CLIP"
+    }
+  },
+  "210": {
+    "inputs": {
+      "width": 1024,
+      "height": 1536,
+      "batch_size": 1
+    },
+    "class_type": "EmptySD3LatentImage",
+    "_meta": {
+      "title": "EmptySD3LatentImage"
+    }
+  },
+  "211": {
+    "inputs": {
+      "text": "Photorealistic full body shot of Mia, a beautiful 40-year-old Brazilian woman with warm caramel skin, straight hair with blunt ends in vibrant red color, deep obsidian eyes, seductive expression, soft thick build, natural A-cup breasts with visible hard nipples, broad hips, big round juicy butt, wearing a very short and revealing sailor-style school uniform, unbuttoned blouse showing underboob and cleavage, extremely short pleated skirt barely covering her ass, no panties.\n\nShe poses provocatively, bending slightly forward, hands on her thighs, looking at the camera with a naughty seductive smile, biting her lip, soft natural lighting, high detail, sharp focus, 4k, extremely detailed skin texture, realistic body, sensual and teasing atmosphere.",
+      "clip": [
+        "201",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Positive Prompt)"
+    }
+  },
+  "275": {
+    "inputs": {
+      "unet_name": "bigLove_kreaedit1.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "Load Diffusion Model"
+    }
+  },
+  "299": {
+    "inputs": {
+      "text": "",
+      "clip": [
+        "201",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Prompt)"
+    }
+  }
+}
