@@ -65,6 +65,16 @@ class LoraRef:
     fields: dict[str, str] = field(default_factory=lambda: dict(_DEFAULT_LORA_FIELDS))
 
 
+def _parse_set_fields(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Normalize a `set_fields` block: {node_id: {field: value}}. Node ids are
+    coerced to str; values are kept verbatim. Non-dict entries are skipped."""
+    return {
+        str(nid): dict(fields)
+        for nid, fields in (data.get("set_fields") or {}).items()
+        if isinstance(fields, dict)
+    }
+
+
 @dataclass
 class WorkflowMapping:
     name: str
@@ -75,6 +85,10 @@ class WorkflowMapping:
     save_images: list[str]                # node IDs
     lora_loaders: list[LoraRef]
     extra_inputs: dict[str, NodeRef] = field(default_factory=dict)
+    # Static widget values injected verbatim at build time: {node_id: {field: value}}.
+    # Use to fill a required widget that a template's API export is missing, or to
+    # pin a value from config without editing the JSON. Opt-in per flow.
+    set_fields: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @classmethod
     def load(cls, name: str, path: Path) -> "WorkflowMapping":
@@ -115,6 +129,7 @@ class WorkflowMapping:
             save_images=save_ids,
             lora_loaders=loras,
             extra_inputs=extras,
+            set_fields=_parse_set_fields(data),
         )
 
 
@@ -245,6 +260,13 @@ def build_workflow(template: dict[str, Any], mapping: WorkflowMapping,
         suffix = "" if len(mapping.save_images) == 1 else f"_n{sid}"
         set_field(sid, "filename_prefix", params.save_prefix + suffix)
 
+    # Static widget values from the mapping's `set_fields`. Applied last so they
+    # win over anything above. inputs() raises a clear error if the node id is
+    # wrong, so a stale mapping fails loud instead of silently no-op'ing.
+    for nid, fields in mapping.set_fields.items():
+        for field_path, value in fields.items():
+            set_field(str(nid), field_path, value)
+
     return wf
 
 
@@ -293,6 +315,7 @@ def _mapping_from_dict(name: str, data: dict[str, Any]) -> WorkflowMapping:
             key: NodeRef.parse(ref, default_field="text")
             for key, ref in (data.get("extra_inputs") or {}).items()
         },
+        set_fields=_parse_set_fields(data),
     )
 
 

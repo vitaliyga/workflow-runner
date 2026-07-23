@@ -30,6 +30,10 @@ workflows:
       main: { node: "93" }
     save_images: ["29"]
     lora_loaders: []
+    # ResolutionSelector на поде требует обязательный виджет `multiple`, которого
+    # нет в API-экспорте (нода новее). Добиваем из конфига, не трогая шаблон.
+    set_fields:
+      "83": { multiple: 16 }
 
   # Krea2 (BigLove) — txt2img generate stage. No input image
   # (EmptySD3LatentImage), so load_images is intentionally empty.
