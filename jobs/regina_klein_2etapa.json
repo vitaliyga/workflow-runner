@@ -1,0 +1,434 @@
+{
+  "173": {
+    "inputs": {
+      "clip_name": "qwen_3_8b.safetensors",
+      "type": "flux2",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "Load CLIP"
+    }
+  },
+  "174": {
+    "inputs": {
+      "vae_name": "flux2-vae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Load VAE"
+    }
+  },
+  "175": {
+    "inputs": {
+      "unet_name": "BigLoveKlein3_bf16.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "Load Diffusion Model"
+    }
+  },
+  "337": {
+    "inputs": {
+      "aspect_ratio": "original",
+      "proportional_width": 1,
+      "proportional_height": 1,
+      "fit": "letterbox",
+      "method": "lanczos",
+      "round_to_multiple": "8",
+      "scale_to_side": "None",
+      "scale_to_length": 1536,
+      "background_color": "#000000",
+      "image": [
+        "616",
+        0
+      ]
+    },
+    "class_type": "LayerUtility: ImageScaleByAspectRatio V2",
+    "_meta": {
+      "title": "LayerUtility: ImageScaleByAspectRatio V2"
+    }
+  },
+  "338": {
+    "inputs": {
+      "text": "Photorealistic hyper-detailed erotic image of a gorgeous naked woman standing with legs apart, hands clasped behind her back, chest forward, detailed shaved pussy, stable standing pose. on a sandy beach",
+      "clip": [
+        "621",
+        1
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Prompt)_POSITIVE_1"
+    }
+  },
+  "341": {
+    "inputs": {
+      "pixels": [
+        "337",
+        0
+      ],
+      "vae": [
+        "174",
+        0
+      ]
+    },
+    "class_type": "VAEEncode",
+    "_meta": {
+      "title": "VAE Encode"
+    }
+  },
+  "342": {
+    "inputs": {
+      "conditioning": [
+        "338",
+        0
+      ],
+      "latent": [
+        "341",
+        0
+      ]
+    },
+    "class_type": "ReferenceLatent",
+    "_meta": {
+      "title": "ReferenceLatent"
+    }
+  },
+  "343": {
+    "inputs": {
+      "text": "lamp,light,changed face, different face, altered face, mutated face, deformed face, face mutation, inconsistent identity, different person, cloned face, altered identity, do not change face, bad anatomy, deformed body, mutated body, bad proportions, asymmetric breasts, deformed breasts, mutated breasts, extra breasts, deformed hands, mutated hands, extra fingers, missing fingers, fused fingers, wrong number of fingers, poorly drawn hands, extra limbs, malformed limbs, extra arms, bad hand anatomy, low quality hands, artifacts, grainy, noise, jpeg artifacts, blurry, low quality, ugly, disfigured, plastic skin, doll-like, overexposed, underexposed, text, watermark, logo, signature, cartoon, 3d render",
+      "clip": [
+        "621",
+        1
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Prompt)_NEGATIVE_1"
+    }
+  },
+  "344": {
+    "inputs": {
+      "conditioning": [
+        "343",
+        0
+      ],
+      "latent": [
+        "341",
+        0
+      ]
+    },
+    "class_type": "ReferenceLatent",
+    "_meta": {
+      "title": "ReferenceLatent"
+    }
+  },
+  "347": {
+    "inputs": {
+      "width": 864,
+      "height": 1152,
+      "batch_size": 1
+    },
+    "class_type": "EmptyFlux2LatentImage",
+    "_meta": {
+      "title": "Empty Flux 2 Latent"
+    }
+  },
+  "348": {
+    "inputs": {
+      "seed": 286791240757199,
+      "steps": 4,
+      "cfg": 1,
+      "nag_scale": 2,
+      "nag_tau": 2.5,
+      "nag_alpha": 0.13,
+      "nag_sigma_end": 0.75,
+      "sampler_name": "euler",
+      "scheduler": "beta",
+      "denoise": 1,
+      "model": [
+        "621",
+        0
+      ],
+      "positive": [
+        "342",
+        0
+      ],
+      "negative": [
+        "344",
+        0
+      ],
+      "nag_negative": [
+        "344",
+        0
+      ],
+      "latent_image": [
+        "347",
+        0
+      ]
+    },
+    "class_type": "KSamplerWithNAG",
+    "_meta": {
+      "title": "KSamplerWithNAG"
+    }
+  },
+  "349": {
+    "inputs": {
+      "samples": [
+        "348",
+        0
+      ],
+      "vae": [
+        "174",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode"
+    }
+  },
+  "616": {
+    "inputs": {
+      "upscale_method": "nearest-exact",
+      "scale_by": 1,
+      "image": [
+        "617",
+        0
+      ]
+    },
+    "class_type": "ImageScaleBy",
+    "_meta": {
+      "title": "Upscale Image By"
+    }
+  },
+  "617": {
+    "inputs": {
+      "image": "125.jpg"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Image"
+    }
+  },
+  "619": {
+    "inputs": {
+      "upscale_method": "bicubic",
+      "scale_by": 1,
+      "image": [
+        "633",
+        0
+      ]
+    },
+    "class_type": "ImageScaleBy",
+    "_meta": {
+      "title": "Upscale Image By"
+    }
+  },
+  "620": {
+    "inputs": {
+      "filename_prefix": "ComfyUI",
+      "images": [
+        "619",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save Image"
+    }
+  },
+  "621": {
+    "inputs": {
+      "lora_name": "None",
+      "strength_model": 0,
+      "strength_clip": 0,
+      "model": [
+        "175",
+        0
+      ],
+      "clip": [
+        "173",
+        0
+      ]
+    },
+    "class_type": "Load Lora",
+    "_meta": {
+      "title": "Load Lora"
+    }
+  },
+  "625": {
+    "inputs": {
+      "aspect_ratio": "original",
+      "proportional_width": 1,
+      "proportional_height": 1,
+      "fit": "letterbox",
+      "method": "lanczos",
+      "round_to_multiple": "8",
+      "scale_to_side": "None",
+      "scale_to_length": 1536,
+      "background_color": "#000000",
+      "image": [
+        "349",
+        0
+      ]
+    },
+    "class_type": "LayerUtility: ImageScaleByAspectRatio V2",
+    "_meta": {
+      "title": "LayerUtility: ImageScaleByAspectRatio V2"
+    }
+  },
+  "626": {
+    "inputs": {
+      "text": "Convert this illustration into a photorealistic photograph. Hyperrealism, amateur photo.This exact same woman. Keep her skin color and ethnicity intact.Keep the exact pose, hairstyle, facial features, and composition of the character unchanged. Render the skin with realistic texture, pores, and subsurface scattering, natural hair with individual strands. Shot like a real photograph, 50mm lens, soft natural lighting, shallow depth of field, true-to-life proportions and skin tones. Remove all illustrated or cartoon qualities: no flat color, no line art, no stylized proportions",
+      "clip": [
+        "173",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Prompt)_POSITIVE_2"
+    }
+  },
+  "627": {
+    "inputs": {
+      "pixels": [
+        "625",
+        0
+      ],
+      "vae": [
+        "174",
+        0
+      ]
+    },
+    "class_type": "VAEEncode",
+    "_meta": {
+      "title": "VAE Encode"
+    }
+  },
+  "628": {
+    "inputs": {
+      "conditioning": [
+        "626",
+        0
+      ],
+      "latent": [
+        "627",
+        0
+      ]
+    },
+    "class_type": "ReferenceLatent",
+    "_meta": {
+      "title": "ReferenceLatent"
+    }
+  },
+  "629": {
+    "inputs": {
+      "text": "lamp,light,changed face, different face, altered face, mutated face, deformed face, face mutation, inconsistent identity, different person, cloned face, altered identity, do not change face, bad anatomy, deformed body, mutated body, bad proportions, asymmetric breasts, deformed breasts, mutated breasts, extra breasts, deformed hands, mutated hands, extra fingers, missing fingers, fused fingers, wrong number of fingers, poorly drawn hands, extra limbs, malformed limbs, extra arms, bad hand anatomy, low quality hands, artifacts, grainy, noise, jpeg artifacts, blurry, low quality, ugly, disfigured, plastic skin, doll-like, overexposed, underexposed, text, watermark, logo, signature, cartoon, 3d render",
+      "clip": [
+        "173",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Prompt)_NEGATIVE_2"
+    }
+  },
+  "630": {
+    "inputs": {
+      "conditioning": [
+        "629",
+        0
+      ],
+      "latent": [
+        "627",
+        0
+      ]
+    },
+    "class_type": "ReferenceLatent",
+    "_meta": {
+      "title": "ReferenceLatent"
+    }
+  },
+  "631": {
+    "inputs": {
+      "width": 864,
+      "height": 1152,
+      "batch_size": 1
+    },
+    "class_type": "EmptyFlux2LatentImage",
+    "_meta": {
+      "title": "Empty Flux 2 Latent"
+    }
+  },
+  "632": {
+    "inputs": {
+      "seed": 872407524340164,
+      "steps": 4,
+      "cfg": 1,
+      "nag_scale": 2,
+      "nag_tau": 2.5,
+      "nag_alpha": 0.13,
+      "nag_sigma_end": 0.75,
+      "sampler_name": "euler",
+      "scheduler": "beta",
+      "denoise": 1,
+      "model": [
+        "175",
+        0
+      ],
+      "positive": [
+        "628",
+        0
+      ],
+      "negative": [
+        "630",
+        0
+      ],
+      "nag_negative": [
+        "630",
+        0
+      ],
+      "latent_image": [
+        "631",
+        0
+      ]
+    },
+    "class_type": "KSamplerWithNAG",
+    "_meta": {
+      "title": "KSamplerWithNAG"
+    }
+  },
+  "633": {
+    "inputs": {
+      "samples": [
+        "632",
+        0
+      ],
+      "vae": [
+        "174",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode"
+    }
+  },
+  "634": {
+    "inputs": {
+      "filename_prefix": "ComfyUI",
+      "images": [
+        "625",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save Image"
+    }
+  }
+}

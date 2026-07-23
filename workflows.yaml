@@ -41,3 +41,21 @@ workflows:
     load_images: {}
     save_images: ["9"]
     lora_loaders: []
+
+  # Regina Klein — Flux 2, два этапа в ОДНОМ графе (A: img2img по входной
+  # картинке → B: конвертация в фотореализм через ReferenceLatent). CSV правит
+  # только этап A (промпт сцены + сэмплер ноды 348); промпты/сид этапа B (626/
+  # 629/632) фиксированы в шаблоне. ВАЖНО: в CSV задавать steps=4, cfg=1,
+  # sampler_name=euler, scheduler=beta — иначе дефолты раннера сломают 4-шаговый
+  # Flux2. Нужен Flux2-стек на поде (KSamplerWithNAG, LayerStyle, ReferenceLatent,
+  # EmptyFlux2LatentImage + BigLoveKlein3_bf16 / qwen_3_8b / flux2-vae).
+  regina_klein_2etapa:
+    template: jobs/regina_klein_2etapa.json
+    ksampler: { node: "348" }
+    positive_prompt: { node: "338" }
+    negative_prompt: { node: "343" }
+    load_images:
+      main: { node: "617" }
+    save_images: ["620", "634"]
+    lora_loaders:
+      - node: "621"
