@@ -129,8 +129,13 @@ class PodPool:
         job = item.job
         bundle = self.workflows.get(job.workflow)
 
-        local_images = [self.inputs_dir / name for name in self._job_images(job)]
-        if not local_images:
+        # txt2img flows have no load_images roles: they need no input image, and
+        # any image left in the CSV is ignored (nowhere to feed it). Only require
+        # images when the mapping actually consumes them.
+        needs_images = bool(bundle.mapping.load_images)
+        local_images = ([self.inputs_dir / name for name in self._job_images(job)]
+                        if needs_images else [])
+        if needs_images and not local_images:
             raise FileNotFoundError(f"input image missing: {job.input_image}")
         for local_image in local_images:
             if not local_image.exists():
@@ -152,7 +157,7 @@ class PodPool:
             lora_strength_clip=job.lora_strength_clip,
             prompt_positive=job.prompt_positive,
             prompt_negative=job.prompt_negative,
-            input_image=remote_images[0],
+            input_image=remote_images[0] if remote_images else "",
             input_images=tuple(remote_images),
             seed=job.seed,
             steps=job.steps,
@@ -230,7 +235,10 @@ class PodPool:
         job = item.job
         bundle = self.workflows.get(job.workflow)
 
-        local_images = [self.inputs_dir / name for name in self._job_images(job)]
+        # Mirror _handle: txt2img flows (no load_images roles) take no image.
+        needs_images = bool(bundle.mapping.load_images)
+        local_images = ([self.inputs_dir / name for name in self._job_images(job)]
+                        if needs_images else [])
         # We don't require the image to exist in dry-run — we just record
         # what would be uploaded.
 
@@ -241,8 +249,8 @@ class PodPool:
             lora_strength_clip=job.lora_strength_clip,
             prompt_positive=job.prompt_positive,
             prompt_negative=job.prompt_negative,
-            input_image=job.input_image,
-            input_images=job.input_images,
+            input_image=job.input_image if needs_images else "",
+            input_images=job.input_images if needs_images else (),
             seed=job.seed,
             steps=job.steps,
             cfg=job.cfg,
