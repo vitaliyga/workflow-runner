@@ -11,11 +11,14 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+log = logging.getLogger(__name__)
 
 
 # Default field names for standard ComfyUI node types. Overridable per role
@@ -342,10 +345,25 @@ class WorkflowRegistry:
         spec = self.flows[name]
         merged = {**self.defaults, **spec}        # shallow merge
         template_path = self.root / merged.pop("template")
-        bundle = WorkflowBundle(
-            name=name,
-            template=load_workflow_template(template_path),
-            mapping=_mapping_from_dict(name, merged),
-        )
+        template = load_workflow_template(template_path)
+        mapping = _mapping_from_dict(name, merged)
+
+        # Drop load_images roles whose node isn't in this template. A txt2img
+        # graph has no LoadImage node, so the `main`->617 role inherited from
+        # `defaults` (or left behind by a UI re-register that doesn't emit an
+        # explicit `load_images: {}`) points at a node that doesn't exist —
+        # keeping it would make the runner demand an input image the graph
+        # can't consume. Pruning here makes "no input image needed" the
+        # automatic outcome, so txt2img flows work without a manual override.
+        pruned = {role: ref for role, ref in mapping.load_images.items()
+                  if str(ref.node) in template}
+        if pruned != mapping.load_images:
+            dropped = sorted(set(mapping.load_images) - set(pruned))
+            log.info("workflow %s: dropped load_images roles %s "
+                     "(nodes absent from template → treating as txt2img)",
+                     name, dropped)
+            mapping.load_images = pruned
+
+        bundle = WorkflowBundle(name=name, template=template, mapping=mapping)
         self._cache[name] = bundle
         return bundle
