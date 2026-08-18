@@ -858,6 +858,53 @@ async def register_workflow(name: str, body: dict[str, Any] = None) -> dict[str,
     return {"ok": True, "key": key, "mapping": mapping}
 
 
+@app.post("/api/workflows/register_all", dependencies=[Depends(auth_dep)])
+async def register_all_workflows() -> dict[str, Any]:
+    """Register every jobs/*.json whose key (filename stem) is not yet in the
+    config. Existing entries are NEVER overwritten — hand-written mappings
+    (multi-stage graphs, curated video fields) always win; re-register those
+    individually if really needed."""
+    jobs_dir = ROOT / "jobs"
+    cfg = load_config()
+    wfs = cfg.setdefault("workflows", {}).setdefault("workflows", {}) or {}
+    registered_now: list[str] = []
+    skipped: list[str] = []
+    errors: list[dict[str, str]] = []
+    for p in sorted(jobs_dir.glob("*.json")) if jobs_dir.exists() else []:
+        key = p.stem
+        if key in wfs:
+            skipped.append(key)
+            continue
+        try:
+            wf = json.loads(p.read_text())
+        except json.JSONDecodeError as e:
+            errors.append({"name": p.name, "error": f"invalid JSON: {e}"})
+            continue
+        if not isinstance(wf, dict) or not all(
+            isinstance(v, dict) and "class_type" in v
+            for v in wf.values() if isinstance(v, dict)
+        ):
+            errors.append({"name": p.name,
+                           "error": "не ComfyUI API-format (нет class_type)"})
+            continue
+        if is_video_workflow(wf):
+            mapping: dict[str, Any] = {
+                "template": f"jobs/{p.name}",
+                "is_video": True,
+                "video_fields": detect_video_mapping(wf),
+            }
+        else:
+            mapping = _autodetect_mapping(wf)
+            mapping["template"] = f"jobs/{p.name}"
+        wfs[key] = mapping
+        registered_now.append(key)
+    if registered_now:
+        cfg["workflows"]["workflows"] = wfs
+        save_config(cfg)
+    return {"ok": True, "registered": registered_now,
+            "skipped": skipped, "errors": errors}
+
+
 @app.get("/api/workflows/{name}/sample_csv", dependencies=[Depends(auth_dep)])
 async def workflow_sample_csv(name: str) -> StreamingResponse:
     """Return a one-row sample CSV for a registered video flow, with exactly
@@ -1609,6 +1656,25 @@ def _resolve_video_flows(cfg: dict[str, Any], jobs: list[VideoJob]) -> dict[str,
     return flows
 
 
+def _missing_video_flows(cfg: dict[str, Any], jobs: list[VideoJob]) -> list[str]:
+    """Workflow keys from the CSV that can't run: not registered, or the
+    registered template JSON is gone from disk. Empty key is the legacy
+    single-template path and isn't flagged (matches _validate_run)."""
+    registered = (cfg.get("workflows") or {}).get("workflows") or {}
+    missing: set[str] = set()
+    for key in {(j.workflow or "").strip() for j in jobs}:
+        if not key:
+            continue
+        spec = registered.get(key)
+        if not spec:
+            missing.add(f"{key} — не зарегистрирован")
+        elif not spec.get("template") or not _resolve_workflow_template_path(
+                str(spec["template"])).exists():
+            missing.add(f"{key} — нет файла шаблона "
+                        f"({spec.get('template') or '?'})")
+    return sorted(missing)
+
+
 @app.post("/api/video-runs", dependencies=[Depends(auth_dep)])
 async def create_video_run(
     csv_file: UploadFile = File(...),
@@ -1670,6 +1736,7 @@ async def create_video_run(
         "run_type": "video",
         "photos": saved_photos,
         "missing_inputs": missing,
+        "missing_flows": _missing_video_flows(load_config(), jobs),
     }
 
 
