@@ -65,14 +65,13 @@
     </table>
     <div class="actions">
       <label class="drop" id="wf-drop" style="padding:14px 18px; flex:1;">
-        <input type="file" id="wf-input" accept=".json,application/json" multiple hidden />
+        <input type="file" id="wf-input" accept=".json,application/json" hidden />
         <div class="drop-body">
-          <strong>+ загрузить workflow JSON (можно несколько)</strong>
+          <strong>+ загрузить workflow JSON</strong>
           <small>API-формат: Settings → Dev mode → Save (API Format)</small>
           <em id="wf-name"></em>
         </div>
       </label>
-      <button class="ghost" id="wf-reg-all" title="Регистрирует только новые файлы — уже зарегистрированные (в т.ч. с ручным мэппингом) не трогает">⚡ Зарегистрировать все</button>
     </div>
     <div id="wf-msg" class="muted"></div>
     <div id="wf-panel"></div>
@@ -251,27 +250,6 @@ async function loadWorkflows() {
   });
 }
 
-document.querySelector("#wf-reg-all").onclick = async () => {
-  const msg = document.querySelector("#wf-msg");
-  msg.textContent = "регистрирую все новые…";
-  const r = await fetch("/api/workflows/register_all",
-                        { method: "POST", headers: auth });
-  if (!r.ok) { msg.textContent = "ошибка: " + await r.text(); return; }
-  const d = await r.json();
-  const parts = [];
-  parts.push(d.registered.length
-    ? `✓ зарегистрировано: ${d.registered.join(", ")}`
-    : "новых файлов нет — всё уже в мэппинге");
-  if (d.skipped.length)
-    parts.push(`пропущено (уже зарегистрированы): ${d.skipped.length}`);
-  if (d.errors.length)
-    parts.push("⚠ ошибки: " +
-      d.errors.map(e => `${e.name} — ${e.error}`).join("; "));
-  msg.textContent = parts.join(" · ");
-  load();
-  loadWorkflows();
-};
-
 async function downloadSample(key) {
   const r = await fetch("/api/workflows/" + encodeURIComponent(key) + "/sample_csv",
                         { headers: auth });
@@ -355,10 +333,7 @@ async function configureWf(name) {
 
 const wfDrop = document.querySelector("#wf-drop");
 const wfInput = document.querySelector("#wf-input");
-wfInput.addEventListener("change", async () => {
-  await uploadWf(wfInput.files);
-  wfInput.value = "";
-});
+wfInput.addEventListener("change", () => uploadWf(wfInput.files));
 ["dragenter", "dragover"].forEach(ev => wfDrop.addEventListener(ev, e => {
   e.preventDefault(); wfDrop.classList.add("hover");
 }));

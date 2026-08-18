@@ -263,28 +263,43 @@ def _node_inputs(template: dict[str, Any], nid: str) -> dict[str, Any]:
 
 def _resolve_field(template: dict[str, Any], spec: dict[str, Any], nid: str) -> str | None:
     """The input this spec would actually write on *nid* — or None if the node
-    carries no such input, in which case the spec must NOT claim it.
+    carries no writable input for it, in which case the spec must NOT claim it.
 
     Order: per-class override → dual slider pair (Xi/Xf) → the spec's own field →
     a Primitive-style `value`. This is what keeps a "duration" title on a
     ``PrimitiveFloat`` writing `value` instead of inventing `Xi`/`Xf`.
+
+    An input already fed by a WIRE is never writable: replacing ``["12", 0]``
+    with a literal silently cuts that edge out of the graph (e.g. a scale node
+    whose `image` comes from the video decoder — it just looks like a normal
+    `image` field to the detector).
     """
     ins = _node_inputs(template, nid)
     if not ins:
         return None
     node = template.get(str(nid)) or {}
     ct = node.get("class_type")
+
+    def writable(field: str) -> bool:
+        return field in ins and not _is_connection(ins[field])
+
     cf = spec.get("class_fields") or {}
-    if ct in cf and cf[ct] in ins:
+    if ct in cf and writable(cf[ct]):
         return cf[ct]
-    if spec["kind"] == "lora":            # rgthree JSON patch — no single field
-        return ""
-    if spec["kind"] == "dual" and "Xi" in ins and "Xf" in ins:
+    if spec["kind"] == "lora":
+        # rgthree JSON patch — no single field, but only a node that really
+        # carries lora_N slots (or is a declared lora class) may be claimed.
+        # Otherwise a legacy default node id lands the patch on, say, ImageBlur.
+        if ct in (spec.get("classes") or []) or any(
+                _is_lora_slot(str(k), v) for k, v in ins.items()):
+            return ""
+        return None
+    if spec["kind"] == "dual" and writable("Xi") and "Xf" in ins:
         return "Xi"
     field = spec.get("field") or ""
-    if field and field in ins:
+    if field and writable(field):
         return field
-    if spec["kind"] in ("scalar", "dual", "video") and "value" in ins:
+    if spec["kind"] in ("scalar", "dual", "video") and writable("value"):
         return "value"
     return None
 
@@ -457,12 +472,14 @@ def build_video_workflow(
         if kind == "lora":
             if isinstance(val, dict):
                 for k, v in val.items():
-                    node_inputs[k] = v
-        elif kind == "dual" and field == "Xi" and "Xf" in node_inputs:
+                    if not _is_connection(node_inputs.get(k)):
+                        node_inputs[k] = v
+        elif kind == "dual" and field == "Xi" and "Xf" in node_inputs \
+                and not _is_connection(node_inputs.get("Xi")):
             # mxSlider-style control: one logical value split across Xi/Xf.
             node_inputs["Xi"] = val
             node_inputs["Xf"] = val
-        elif field and field in node_inputs:
+        elif field and field in node_inputs and not _is_connection(node_inputs[field]):
             node_inputs[field] = val
         elif field:
             # The mapping points at a field the node doesn't have (stale config,
@@ -478,13 +495,15 @@ def build_video_workflow(
             if isinstance(node, dict) and node.get("class_type") in VIDEO_SAVE_CLASSES:
                 node.setdefault("inputs", {})["filename_prefix"] = save_prefix
 
-    # Advanced arbitrary patches "node_id.field" -> value
+    # Advanced arbitrary patches "node_id.field" -> value. An input fed by a
+    # wire is left alone: a literal in place of ["12", 0] would delete that edge
+    # (and ComfyUI would reject the wrong type anyway).
     for ekey, raw_value in (extra or {}).items():
         if "." not in ekey:
             continue
         nid, _, fld = ekey.partition(".")
         node_inputs = inputs(nid)
-        if node_inputs is not None:
+        if node_inputs is not None and not _is_connection(node_inputs.get(fld)):
             node_inputs[fld] = _parse_cell(raw_value)
 
     return wf
