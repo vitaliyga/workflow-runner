@@ -24,12 +24,22 @@ from typing import Any
 #   key        : CSV column name == VideoJob attribute
 #   field      : node input field to write
 #   kind       : 'scalar' | 'dual' (writes Xi & Xf) | 'lora' (JSON patch)
+#                | 'video' (scalar, but the value is a file uploaded to the pod)
 #   cast       : how to coerce the CSV string
 #   title_kw   : keyword groups for _meta.title detection. A node matches if
 #                ALL words in ANY group are present (case-insensitive).
 #   classes    : class_type fallbacks for detection
+#   class_fields: per-class field override (same concept, different input name —
+#                e.g. RandomNoise.noise_seed, PrimitiveFloat.value)
+#   probe_field: detect by *input presence* — claim the first node that actually
+#                has this input. Covers nodes whose title says nothing about the
+#                field (MiniMaxH3ReferenceToVideo carries width/height itself).
 #   default    : last-resort node id (legacy LTX 2.3 template), used only if
 #                that node actually exists in the template
+#
+# A spec only claims a node if the field it would write RESOLVES on that node
+# (see ``_resolve_field``) — so a "duration" title on a PrimitiveFloat writes
+# `value`, and never sprays dual-slider `Xi`/`Xf` onto a node that has neither.
 # --------------------------------------------------------------------------
 VIDEO_FIELD_CATALOG: list[dict[str, Any]] = [
     {"key": "input_image", "label": "Входное фото (1-й кадр)", "field": "image",
@@ -44,13 +54,34 @@ VIDEO_FIELD_CATALOG: list[dict[str, Any]] = [
      "kind": "scalar", "cast": "str",
      "title_kw": [["last", "frame"], ["last", "image"]], "classes": []},
 
+    # Reference VIDEO (ref2v flows: MiniMax H3 and friends). Like input_image it
+    # names a file under the run's inputs/ — the runner uploads it to the pod's
+    # ComfyUI input dir before submitting. `exclude_kw` keeps a "Load Video VAE"
+    # title from grabbing it (the field wouldn't resolve there anyway).
+    {"key": "input_video", "label": "Референсное видео", "field": "file",
+     "kind": "video", "cast": "str",
+     "title_kw": [["reference", "video"], ["ref", "video"],
+                  ["input", "video"], ["load", "video"], ["source", "video"]],
+     "classes": ["LoadVideo", "VHS_LoadVideo"],
+     "class_fields": {"VHS_LoadVideo": "video"},
+     "exclude_kw": ["vae", "save", "create", "combine"]},
+
+    # A bare "prompt" title counts too (MiniMax H3 drives the prompt from a
+    # PrimitiveStringMultiline titled "Input Text (Prompt)", whose input is
+    # `value`, not `text`) — but never a *negative* one, hence exclude_kw.
     {"key": "prompt_positive", "label": "Позитивный промт", "field": "text",
      "kind": "scalar", "cast": "str",
-     "title_kw": [["positive"]], "classes": [], "default": "28"},
+     "title_kw": [["positive"], ["prompt"]], "classes": [],
+     "class_fields": {"PrimitiveStringMultiline": "value",
+                      "PrimitiveString": "value", "String Literal": "value"},
+     "exclude_kw": ["negative"], "default": "28"},
 
     {"key": "prompt_negative", "label": "Негативный промт", "field": "text",
      "kind": "scalar", "cast": "str",
-     "title_kw": [["negative"]], "classes": [], "default": "29"},
+     "title_kw": [["negative"]], "classes": [],
+     "class_fields": {"PrimitiveStringMultiline": "value",
+                      "PrimitiveString": "value", "String Literal": "value"},
+     "default": "29"},
 
     # seed: classic "Seed" nodes use field `seed`; RandomNoise uses `noise_seed`.
     {"key": "seed", "label": "Seed", "field": "seed",
@@ -58,18 +89,48 @@ VIDEO_FIELD_CATALOG: list[dict[str, Any]] = [
      "title_kw": [["seed"]], "classes": ["Seed (rgthree)", "Seed", "RandomNoise"],
      "class_fields": {"RandomNoise": "noise_seed"}, "default": "125"},
 
+    # Length/width/height are mxSlider (Xi/Xf) pairs in the LTX templates, but a
+    # plain `PrimitiveFloat`/`PrimitiveInt` (MiniMax H3: "Float (Duration)") or a
+    # node carrying width/height itself elsewhere — hence class_fields+probe_field.
     {"key": "video_length_seconds", "label": "Длина (сек)", "field": "Xi",
      "kind": "dual", "cast": "int",
      "title_kw": [["length"], ["duration"], ["sec"]],
-     "classes": [], "default": "18"},
+     "classes": ["PrimitiveFloat", "PrimitiveInt"],
+     "class_fields": {"PrimitiveFloat": "value", "PrimitiveInt": "value"},
+     "default": "18"},
 
     {"key": "video_width", "label": "Ширина", "field": "Xi",
      "kind": "dual", "cast": "int",
-     "title_kw": [["width"]], "classes": [], "default": "19"},
+     "title_kw": [["width"]], "classes": [], "probe_field": "width",
+     "default": "19"},
 
     {"key": "video_height", "label": "Высота", "field": "Xi",
      "kind": "dual", "cast": "int",
-     "title_kw": [["height"]], "classes": [], "default": "181"},
+     "title_kw": [["height"]], "classes": [], "probe_field": "height",
+     "default": "181"},
+
+    # Sampler knobs. A flow may put them on BasicScheduler (MiniMax H3), on a
+    # plain KSampler, or on LTXVScheduler — все три ловятся по title/классу, а
+    # поле подтверждается наличием на ноде.
+    {"key": "steps", "label": "Шаги (steps)", "field": "steps",
+     "kind": "scalar", "cast": "int",
+     "title_kw": [["scheduler"], ["steps"], ["sampler"]],
+     "classes": ["BasicScheduler", "LTXVScheduler", "KSampler", "KSamplerAdvanced"]},
+
+    {"key": "denoise", "label": "Denoise", "field": "denoise",
+     "kind": "scalar", "cast": "float",
+     "title_kw": [["scheduler"], ["denoise"], ["sampler"]],
+     "classes": ["BasicScheduler", "KSampler", "KSamplerAdvanced"]},
+
+    {"key": "scheduler", "label": "Scheduler", "field": "scheduler",
+     "kind": "scalar", "cast": "str",
+     "title_kw": [["scheduler"]],
+     "classes": ["BasicScheduler", "KSampler", "KSamplerAdvanced"]},
+
+    {"key": "sampler_name", "label": "Sampler", "field": "sampler_name",
+     "kind": "scalar", "cast": "str",
+     "title_kw": [["sampler"]],
+     "classes": ["KSamplerSelect", "KSampler", "KSamplerAdvanced"]},
 
     {"key": "sigmas_first_pass", "label": "Sigmas 1-й проход", "field": "sigmas",
      "kind": "scalar", "cast": "str",
@@ -137,6 +198,21 @@ VIDEO_FIELD_CATALOG: list[dict[str, Any]] = [
      "field": "", "kind": "lora", "cast": "json",
      "title_kw": [["distilled", "final"], ["distilled", "last"]],
      "classes": []},
+
+    # Plain LoraLoader / LoraLoaderModelOnly (MiniMax H3 turbo lora): two simple
+    # scalar columns instead of the rgthree JSON patch. Deliberately AFTER the
+    # JSON specs, so a Power Lora Loader flow is claimed by those first.
+    {"key": "lora_name", "label": "Lora (имя файла)", "field": "lora_name",
+     "kind": "scalar", "cast": "str",
+     "title_kw": [["lora"]],
+     "classes": ["LoraLoaderModelOnly", "LoraLoader"],
+     "exclude_kw": ["power", "distilled"]},
+
+    {"key": "lora_strength", "label": "Lora (сила)", "field": "strength_model",
+     "kind": "scalar", "cast": "float",
+     "title_kw": [["lora"]],
+     "classes": ["LoraLoaderModelOnly", "LoraLoader"],
+     "exclude_kw": ["power", "distilled"]},
 ]
 
 _CATALOG_BY_KEY = {f["key"]: f for f in VIDEO_FIELD_CATALOG}
@@ -179,66 +255,116 @@ def is_video_workflow(template: dict[str, Any]) -> bool:
     return False
 
 
+def _node_inputs(template: dict[str, Any], nid: str) -> dict[str, Any]:
+    node = template.get(str(nid))
+    ins = node.get("inputs") if isinstance(node, dict) else None
+    return ins if isinstance(ins, dict) else {}
+
+
+def _resolve_field(template: dict[str, Any], spec: dict[str, Any], nid: str) -> str | None:
+    """The input this spec would actually write on *nid* — or None if the node
+    carries no such input, in which case the spec must NOT claim it.
+
+    Order: per-class override → dual slider pair (Xi/Xf) → the spec's own field →
+    a Primitive-style `value`. This is what keeps a "duration" title on a
+    ``PrimitiveFloat`` writing `value` instead of inventing `Xi`/`Xf`.
+    """
+    ins = _node_inputs(template, nid)
+    if not ins:
+        return None
+    node = template.get(str(nid)) or {}
+    ct = node.get("class_type")
+    cf = spec.get("class_fields") or {}
+    if ct in cf and cf[ct] in ins:
+        return cf[ct]
+    if spec["kind"] == "lora":            # rgthree JSON patch — no single field
+        return ""
+    if spec["kind"] == "dual" and "Xi" in ins and "Xf" in ins:
+        return "Xi"
+    field = spec.get("field") or ""
+    if field and field in ins:
+        return field
+    if spec["kind"] in ("scalar", "dual", "video") and "value" in ins:
+        return "value"
+    return None
+
+
 def detect_video_mapping(template: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Best-guess {field_key: {node, field}} for a video template.
 
     Strategy per field: match by node title keywords first (most reliable),
-    then by class_type, then fall back to the legacy default node id only if
-    that node actually exists. Each node is claimed by at most one field.
+    then by class_type, then by input presence (`probe_field`), then fall back to
+    the legacy default node id only if that node actually exists.
+
+    A spec claims a node only if its field resolves there (``_resolve_field``),
+    so a title that merely *sounds* right can no longer produce a bogus patch.
+    Claims are per (node, field): one node may legitimately drive several fields
+    (MiniMaxH3ReferenceToVideo holds both width and height; BasicScheduler holds
+    steps, denoise and scheduler).
     """
     mapping: dict[str, dict[str, Any]] = {}
-    claimed: set[str] = set()
+    claimed: set[tuple[str, str]] = set()
 
-    def field_for(spec: dict[str, Any], nid: str) -> str:
-        """Resolve the input field for a node — some specs map the same concept
-        to a different field per node class (e.g. seed -> RandomNoise.noise_seed)."""
-        cf = spec.get("class_fields")
-        if cf:
-            node = template.get(str(nid))
-            ct = node.get("class_type") if isinstance(node, dict) else None
-            if ct in cf:
-                return cf[ct]
-        return spec["field"]
+    def try_claim(key: str, nid: str, spec: dict[str, Any]) -> bool:
+        field = _resolve_field(template, spec, str(nid))
+        if field is None or (str(nid), field) in claimed:
+            return False
+        mapping[key] = {"node": str(nid), "field": field}
+        claimed.add((str(nid), field))
+        return True
 
-    def claim(key: str, nid: str, spec: dict[str, Any]) -> None:
-        mapping[key] = {"node": str(nid), "field": field_for(spec, nid)}
-        claimed.add(str(nid))
+    def excluded(spec: dict[str, Any], title: str) -> bool:
+        return any(w in title for w in (spec.get("exclude_kw") or []))
 
     # Pass 1 — titles (skip nodes carrying an exclude keyword)
     for spec in VIDEO_FIELD_CATALOG:
         if spec["key"] in mapping:
             continue
-        excl = spec.get("exclude_kw") or []
         for nid, node in template.items():
-            if not isinstance(node, dict) or str(nid) in claimed:
+            if not isinstance(node, dict):
                 continue
             title = _title(node)
-            if not title:
-                continue
-            if any(w in title for w in excl):
+            if not title or excluded(spec, title):
                 continue
             if _title_matches(title, spec.get("title_kw") or []):
-                claim(spec["key"], nid, spec)
-                break
+                if try_claim(spec["key"], nid, spec):
+                    break
 
     # Pass 2 — class_type
     for spec in VIDEO_FIELD_CATALOG:
         if spec["key"] in mapping or not spec.get("classes"):
             continue
         for nid, node in template.items():
-            if not isinstance(node, dict) or str(nid) in claimed:
+            if not isinstance(node, dict) or excluded(spec, _title(node)):
                 continue
             if node.get("class_type") in spec["classes"]:
-                claim(spec["key"], nid, spec)
-                break
+                if try_claim(spec["key"], nid, spec):
+                    break
 
-    # Pass 3 — legacy default node id, only if present and free
+    # Pass 3 — input presence: the node whose inputs literally carry this field.
+    # Catches nodes whose title says nothing about it (MiniMax H3 keeps width and
+    # height on the ref2v node itself).
+    for spec in VIDEO_FIELD_CATALOG:
+        probe = spec.get("probe_field")
+        if spec["key"] in mapping or not probe:
+            continue
+        for nid, node in template.items():
+            if not isinstance(node, dict) or excluded(spec, _title(node)):
+                continue
+            ins = _node_inputs(template, nid)
+            if probe in ins and not _is_connection(ins[probe]):
+                if (str(nid), probe) not in claimed:
+                    mapping[spec["key"]] = {"node": str(nid), "field": probe}
+                    claimed.add((str(nid), probe))
+                    break
+
+    # Pass 4 — legacy default node id, only if present and the field resolves
     for spec in VIDEO_FIELD_CATALOG:
         if spec["key"] in mapping:
             continue
         dflt = spec.get("default")
-        if dflt and str(dflt) in template and str(dflt) not in claimed:
-            claim(spec["key"], dflt, spec)
+        if dflt and str(dflt) in template:
+            try_claim(spec["key"], str(dflt), spec)
 
     return mapping
 
@@ -261,6 +387,25 @@ def _coerce(value: Any, cast: str) -> Any:
             return value
         return json.loads(value)
     return value
+
+
+# CSV cells for BOOLEAN widgets. `json.loads` handles lowercase true/false, but
+# a cell round-tripped through Python/Excel arrives as "False"/"True" — without
+# this it reached ComfyUI as a non-empty STRING, i.e. always truthy (so
+# `match_image_size=False` silently behaved like True).
+_BOOL_WORDS = {"true": True, "false": False, "yes": True, "no": False,
+               "да": True, "нет": False}
+
+
+def _parse_cell(raw: Any) -> Any:
+    """CSV cell -> JSON value, with a bool fallback. Non-JSON stays a string."""
+    if not isinstance(raw, str):
+        return raw
+    try:
+        return json.loads(raw)
+    except (ValueError, TypeError):
+        pass
+    return _BOOL_WORDS.get(raw.strip().lower(), raw)
 
 
 def _is_empty(value: Any) -> bool:
@@ -309,15 +454,23 @@ def build_video_workflow(
             continue
 
         kind = spec["kind"]
-        if kind == "dual":
-            node_inputs["Xi"] = val
-            node_inputs["Xf"] = val
-        elif kind == "lora":
+        if kind == "lora":
             if isinstance(val, dict):
                 for k, v in val.items():
                     node_inputs[k] = v
-        else:
+        elif kind == "dual" and field == "Xi" and "Xf" in node_inputs:
+            # mxSlider-style control: one logical value split across Xi/Xf.
+            node_inputs["Xi"] = val
+            node_inputs["Xf"] = val
+        elif field and field in node_inputs:
             node_inputs[field] = val
+        elif field:
+            # The mapping points at a field the node doesn't have (stale config,
+            # hand-edited storage/config.yaml). Writing it would silently do
+            # nothing useful, so re-resolve against the node we actually have.
+            resolved = _resolve_field(wf, spec, nid)
+            if resolved:
+                node_inputs[resolved] = val
 
     # Save prefix: auto-target the save node(s) — VHS_VideoCombine or SaveVideo.
     if save_prefix:
@@ -332,10 +485,7 @@ def build_video_workflow(
         nid, _, fld = ekey.partition(".")
         node_inputs = inputs(nid)
         if node_inputs is not None:
-            try:
-                node_inputs[fld] = json.loads(raw_value)
-            except (ValueError, TypeError):
-                node_inputs[fld] = raw_value
+            node_inputs[fld] = _parse_cell(raw_value)
 
     return wf
 
@@ -351,6 +501,8 @@ def _current_value(template: dict[str, Any], ref: dict[str, Any], spec: dict[str
         return json.dumps(patch) if patch else ""
     field = ref.get("field") or spec["field"]
     val = ins.get(field, "")
+    if isinstance(val, bool):
+        return "true" if val else "false"
     return "" if val is None else str(val)
 
 
@@ -384,6 +536,9 @@ def sample_csv_for(
 # for any workflow. Connections ([node, idx]) and widget objects are skipped.
 # --------------------------------------------------------------------------
 _LOADIMAGE_CLASSES = {"LoadImage"}
+# Nodes that read a VIDEO file from ComfyUI's input dir. Their file column is
+# uploaded to the pod just like a photo — {class: field}.
+_LOADVIDEO_FIELDS = {"LoadVideo": "file", "VHS_LoadVideo": "video"}
 # Utility/housekeeping nodes — no per-job-meaningful inputs.
 _SKIP_CLASSES = VIDEO_SAVE_CLASSES | {
     "RAMCleanup", "VRAMCleanup", "VRAM_Debug", "ImpactDummyInput",
@@ -407,9 +562,11 @@ def _editable_value(v: Any) -> bool:
 def _skip_field(field: str) -> bool:
     """Structural junk fields, independent of node type:
     - 'isfloatX' — mxSlider's int/float toggle (collapsed into one column);
+    - '*-preview' — the frontend's preview widget (LoadVideo/SaveVideo export it
+      as an empty string; it is not an input of the node);
     - widget buttons whose key starts with a non-word char (e.g. rgthree's
       '➕ Add Lora')."""
-    if field == "isfloatX":
+    if field == "isfloatX" or field.endswith("-preview"):
         return True
     first = field[:1]
     return bool(first) and not (first.isalnum() or first == "_")
@@ -418,8 +575,8 @@ def _skip_field(field: str) -> bool:
 def _cast_of(v: Any) -> str:
     if isinstance(v, (dict, list)):
         return "json"
-    if isinstance(v, bool):
-        return "str"
+    if isinstance(v, bool):      # before int — bool IS an int in Python
+        return "bool"
     if isinstance(v, int):
         return "int"
     if isinstance(v, float):
@@ -445,8 +602,9 @@ def full_columns(template: dict[str, Any]) -> list[dict[str, Any]]:
     - widget-button keys ('➕ …') and connections/dicts skipped;
     - save/cleanup/debug nodes skipped entirely.
     Label = node title (+ '.<field>' if the node yields >1 column); duplicate
-    labels get a '#<node_id>' suffix. ``image`` marks LoadImage.image (uploaded
-    as a file); ``dual`` marks sliders (runtime writes Xi & Xf)."""
+    labels get a '#<node_id>' suffix. ``image`` marks LoadImage.image and
+    ``video`` marks LoadVideo.file — both are uploaded to the pod as files;
+    ``dual`` marks sliders (runtime writes Xi & Xf)."""
     items: list[dict[str, Any]] = []
     for nid, node in template.items():
         if not isinstance(node, dict):
@@ -486,6 +644,7 @@ def full_columns(template: dict[str, Any]) -> list[dict[str, Any]]:
             "label": label, "node": it["node"], "field": it["field"],
             "cast": _cast_of(it["value"]), "value": it["value"],
             "image": it["cls"] in _LOADIMAGE_CLASSES and it["field"] == "image",
+            "video": _LOADVIDEO_FIELDS.get(it["cls"]) == it["field"],
             "dual": it["dual"],
         })
     cols.sort(key=lambda c: (int(c["node"]) if c["node"].isdigit() else 1 << 30, c["field"]))
@@ -509,6 +668,8 @@ def universal_sample_csv(template: dict[str, Any], workflow_key: str,
         v = c["value"]
         if isinstance(v, (dict, list)):
             row.append(json.dumps(v, ensure_ascii=False))
+        elif isinstance(v, bool):
+            row.append("true" if v else "false")   # JSON spelling, not "True"
         else:
             row.append("" if v is None else str(v))
 

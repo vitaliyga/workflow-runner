@@ -774,7 +774,10 @@ async def detect_workflow(name: str) -> dict[str, Any]:
     if video:
         for c in full_columns(wf):
             lab = c["label"].lower()
-            default = c["image"] or any(w in lab for w in ("positive", "negative", "seed"))
+            # Pre-tick what a per-job CSV almost always drives: uploaded files
+            # (photos + reference video), prompts and the seed.
+            default = (c["image"] or c.get("video")
+                       or any(w in lab for w in ("positive", "negative", "seed", "prompt")))
             uni.append({**c, "default": default})
     return {
         "name": safe,
@@ -833,7 +836,8 @@ async def register_workflow(name: str, body: dict[str, Any] = None) -> dict[str,
         if isinstance(uni, list) and uni:
             entry["universal_columns"] = [
                 {"label": str(c.get("label")), "node": str(c.get("node")),
-                 "field": str(c.get("field")), "image": bool(c.get("image"))}
+                 "field": str(c.get("field")), "image": bool(c.get("image")),
+                 "video": bool(c.get("video"))}
                 for c in uni if c.get("label") and c.get("node") and c.get("field")
             ]
         for k, v in (body.get("overrides") or {}).items():
@@ -1154,10 +1158,10 @@ async def create_run(
 def _missing_inputs(state: RunState) -> list[str]:
     inputs = state.dir / "inputs"
     needed = {
-        img
+        f
         for j in state.jobs
-        for img in (j.get("input_images") or [j.get("input_image")])
-        if img
+        for f in (j.get("input_files") or j.get("input_images") or [j.get("input_image")])
+        if f
     }
     return sorted(n for n in needed if not (inputs / n).exists())
 
@@ -1547,6 +1551,31 @@ async def cancel_run(run_id: str) -> dict[str, Any]:
 VIDEO_WORKFLOW_TEMPLATE_PATH = ROOT / "video_workflow.json"
 
 
+def _video_job_input_files(job: VideoJob, cfg: dict[str, Any]) -> list[str]:
+    """Every file this job expects under the run's inputs/ — photos AND reference
+    videos, catalog columns as well as universal (title-based) ones.
+
+    Feeds the pre-flight "missing inputs" check: a forgotten 3rd reference photo
+    or reference clip is reported before the run starts, instead of blowing up
+    mid-flight inside the pod worker.
+    """
+    names = [job.input_image, job.input_image_last, job.input_video]
+    spec = ((cfg.get("workflows") or {}).get("workflows") or {}).get(
+        (job.workflow or "").strip()) or {}
+    tmpl = str(spec.get("template") or "")
+    if tmpl and job.extra:
+        try:
+            template = json.loads(_resolve_workflow_template_path(tmpl).read_text())
+            cols = {c["label"]: c for c in full_columns(template)}
+        except (OSError, ValueError):
+            cols = {}
+        for label, raw in job.extra.items():
+            col = cols.get(label)
+            if col and (col.get("image") or col.get("video")):
+                names.append(str(raw or "").strip())
+    return [n for n in names if n]
+
+
 def _resolve_video_flows(cfg: dict[str, Any], jobs: list[VideoJob]) -> dict[str, tuple[dict, dict]]:
     """For each distinct `workflow` key used by the jobs, resolve
     (template, mapping). Registered video flows win; otherwise fall back to
@@ -1608,6 +1637,7 @@ async def create_video_run(
     state.save_prompt = save_prompt
     state.lora_folder = lora_folder
     jobs = load_video_jobs(rd / "jobs.csv")
+    cfg = load_config()
     for i, j in enumerate(jobs):
         state.jobs.append({
             "idx": i,
@@ -1619,6 +1649,9 @@ async def create_video_run(
             "prompt_positive": j.prompt_positive,
             "input_image": j.input_image,
             "input_images": [x for x in (j.input_image, j.input_image_last) if x],
+            "input_video": j.input_video,
+            # every referenced file (incl. universal photo/video columns)
+            "input_files": _video_job_input_files(j, cfg),
             "seed": j.seed,
             "video_length_seconds": j.video_length_seconds,
             "video_width": j.video_width,
@@ -1738,17 +1771,20 @@ async def _video_handle(
 
     template, mapping = flows[(job.workflow or "").strip()]
 
-    # Upload input image(s). FLF2V flows use a second (last) frame.
-    async def _upload_ref(name: str) -> str:
+    # Upload input file(s) from the run's inputs/ dir into ComfyUI's input dir.
+    # Photos (FLF2V flows use a second, "last" frame) and reference videos
+    # (ref2v flows like MiniMax H3) go through the same endpoint.
+    async def _upload_ref(name: str, what: str = "file") -> str:
         if not name:
             return ""
-        local_img = state.dir / "inputs" / name
-        if not local_img.exists():
-            raise FileNotFoundError(f"input image missing: {local_img}")
-        return await client.upload_image(local_img)
+        local = state.dir / "inputs" / name
+        if not local.exists():
+            raise FileNotFoundError(f"input {what} missing: {local}")
+        return await client.upload_file(local)
 
-    remote_image = await _upload_ref(job.input_image)
-    remote_image_last = await _upload_ref(job.input_image_last)
+    remote_image = await _upload_ref(job.input_image, "image")
+    remote_image_last = await _upload_ref(job.input_image_last, "image")
+    remote_video = await _upload_ref(job.input_video, "video")
 
     day_tag = _run_day_tag(state.run_id)
     # Layout: <day>/<HHMMSS_workflow>/[<lora+strength>/]<girl>. HHMMSS groups
@@ -1766,6 +1802,7 @@ async def _video_handle(
     values = {
         "input_image": remote_image,
         "input_image_last": remote_image_last,
+        "input_video": remote_video,
         "prompt_positive": job.prompt_positive,
         "prompt_negative": job.prompt_negative,
         "seed": job.seed,
@@ -1778,15 +1815,22 @@ async def _video_handle(
         "cfg_final_pass": job.cfg_final_pass,
         "audio_volume_first": job.audio_volume_first,
         "audio_volume_final": job.audio_volume_final,
+        "steps": job.steps,
+        "denoise": job.denoise,
+        "scheduler": job.scheduler,
+        "sampler_name": job.sampler_name,
         "checkpoint_name": job.checkpoint_name,
         "diffusion_model_name": job.diffusion_model_name,
+        "lora_name": job.lora_name,
+        "lora_strength": job.lora_strength,
         "load_loras_json": job.load_loras_json,
         "load_distilled_lora_json": job.load_distilled_lora_json,
         "load_distilled_lora_final_json": job.load_distilled_lora_final_json,
     }
     # Universal columns: any CSV column matching a title-based label (from
-    # full_columns) is translated to a raw <node>.<field> patch; image columns
-    # are uploaded first. Numeric <node>.<field> columns pass through untouched.
+    # full_columns) is translated to a raw <node>.<field> patch; image and video
+    # columns are uploaded first. Numeric <node>.<field> columns pass through
+    # untouched.
     extra_patches = dict(job.extra or {})
     cols = {c["label"]: c for c in full_columns(template)}
     for label in list(extra_patches.keys()):
@@ -1796,8 +1840,9 @@ async def _video_handle(
         raw = str(extra_patches.pop(label) or "").strip()
         if not raw:
             continue
-        if spec["image"]:
-            extra_patches[f'{spec["node"]}.{spec["field"]}'] = await _upload_ref(raw)
+        if spec["image"] or spec.get("video"):
+            what = "video" if spec.get("video") else "image"
+            extra_patches[f'{spec["node"]}.{spec["field"]}'] = await _upload_ref(raw, what)
         elif spec.get("dual"):                       # mxSlider — write both Xi & Xf
             extra_patches[f'{spec["node"]}.Xi'] = raw
             extra_patches[f'{spec["node"]}.Xf'] = raw

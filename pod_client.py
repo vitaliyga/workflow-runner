@@ -41,8 +41,15 @@ class PodClient:
             h["Authorization"] = f"Bearer {self.cfg.api_key}"
         return h
 
-    async def upload_image(self, path: Path, subfolder: str = "") -> str:
-        """Uploads to ComfyUI input dir. Returns the filename usable by LoadImage."""
+    async def upload_file(self, path: Path, subfolder: str = "") -> str:
+        """Uploads any input file (photo, reference video, audio) into ComfyUI's
+        input dir and returns the name a loader node can use.
+
+        ComfyUI's `/upload/image` route stores whatever multipart file it gets —
+        it does not decode it as an image — so `LoadVideo` reference clips go the
+        same way. The form field must still be called "image" (that is the route's
+        parameter name), hence the one endpoint for both.
+        """
         data = aiohttp.FormData()
         data.add_field("image", path.open("rb"), filename=path.name,
                        content_type="application/octet-stream")
@@ -52,11 +59,15 @@ class PodClient:
         url = f"{self.cfg.url}/upload/image"
         async with self.session.post(url, data=data, headers=self._headers) as r:
             if r.status != 200:
-                raise PodError(f"upload_image {r.status}: {await r.text()}")
+                raise PodError(f"upload_file {path.name} {r.status}: {await r.text()}")
             body = await r.json()
         name = body.get("name", path.name)
         sub = body.get("subfolder", "")
         return f"{sub}/{name}" if sub else name
+
+    async def upload_image(self, path: Path, subfolder: str = "") -> str:
+        """Back-compat alias — same endpoint, kept for existing call sites."""
+        return await self.upload_file(path, subfolder)
 
     async def submit(self, workflow: dict[str, Any]) -> str:
         payload = {"prompt": workflow, "client_id": self.client_id}

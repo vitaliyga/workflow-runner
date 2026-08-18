@@ -37,7 +37,8 @@ curl -s "$R/api/workflows" | jq '.[] | {name, type}'
 
 # 2. получить шаблон CSV. universal_csv = все входы нод (колонки <title>[.field]).
 #    Минимальный CSV безопаснее full-dump: берёшь только нужные колонки,
-#    остальное держит дефолт шаблона (full-dump может попортить bool: True→"True").
+#    остальное держит дефолт шаблона. (bool-ячейки безопасны: "false"/"False"
+#    читаются как false, а не как непустая строка.)
 curl -s "$R/api/workflows/<key>/universal_csv" -o sample.csv
 
 # 3. одна строка: workflow + girl + только меняемые колонки (напр. 4 кадра)
@@ -59,10 +60,15 @@ curl -s "$R/api/runs/<run_id>/status" | jq '.jobs[0] | {status, duration, files,
 `<ДД-ММ>/<HHMMSS_workflow>/<girl>[/params]/<girl>_<idx>_seed<seed>_…`.
 Image-прогон идентичен, только `POST /api/runs` вместо `/api/video-runs`.
 
-> **Картиночные колонки** грузятся автоматически: значение ячейки = имя файла,
-> залитого с прогоном. «Дружелюбные» поля (`input_image`, `input_image_last`,
-> `seed`, …) и универсальные колонки `<title>` можно мешать. Power Lora Loader
-> отдаётся как JSON-ячейка `{"on":true,"lora":"…","strength":0.5}`.
+> **Файловые колонки** грузятся автоматически: значение ячейки = имя файла,
+> залитого с прогоном — и для фото (`LoadImage`), и для референсного **видео**
+> (`LoadVideo`, колонка `input_video`); mp4/webm/mov отправляются через тот же
+> `-F photos=@clip.mp4`. «Дружелюбные» поля (`input_image`, `input_image_last`,
+> `input_video`, `seed`, `steps`, `denoise`, `scheduler`, `sampler_name`,
+> `video_width`, `video_height`, `video_length_seconds`, `lora_name`,
+> `lora_strength`, …) и универсальные колонки `<title>` можно мешать. Power Lora
+> Loader отдаётся как JSON-ячейка `{"on":true,"lora":"…","strength":0.5}`.
+> Пустая ячейка = «оставить значение шаблона».
 
 ### RunPod: подводные камни (важно для агентов)
 

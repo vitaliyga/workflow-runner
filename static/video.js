@@ -340,13 +340,18 @@ setInterval(loadHistory, 10000);
 // Lists registered video flows (incl. LTX v1/v2). Selecting one shows that
 // flow's CSV columns and points the sample-CSV link at its per-flow sample.
 const FIELD_LABELS = {
-  input_image: "входное фото", prompt_positive: "позитивный промт",
+  input_image: "входное фото", input_image_last: "фото (последний кадр)",
+  input_video: "референсное видео",
+  prompt_positive: "позитивный промт",
   prompt_negative: "негативный промт", seed: "сид",
   video_length_seconds: "длина (сек)", video_width: "ширина", video_height: "высота",
   sigmas_first_pass: "sigmas 1-й проход", sigmas_final_pass: "sigmas финальный",
   cfg_first_pass: "CFG 1-й проход", cfg_final_pass: "CFG финальный",
   audio_volume_first: "громкость 1-й", audio_volume_final: "громкость финал",
+  steps: "шаги (steps)", denoise: "denoise",
+  scheduler: "scheduler", sampler_name: "sampler",
   checkpoint_name: "checkpoint", diffusion_model_name: "diffusion model",
+  lora_name: "лора (имя файла)", lora_strength: "лора (сила)",
   load_loras_json: "лора (основная)",
   load_distilled_lora_json: "лора distilled — 1-й проход",
   load_distilled_lora_final_json: "лора distilled — финальный проход",

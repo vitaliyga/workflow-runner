@@ -98,3 +98,49 @@ sleep 3; tail -5 app.log
 (`POST /api/runs`); видео — `video_csv_loader.py` + `video_workflow_builder.py`
 (`POST /api/video-runs`). Классификация при регистрации — `is_video_workflow()`.
 Раннер выполняет **один граф на строку CSV** — межграфового чейнинга нет.
+
+## Как добавить видео-workflow
+
+1. Сохранить граф как **API Format**, положить в `jobs/`.
+2. Зарегистрировать в Settings. Детектор (`detect_video_mapping`) сам разложит
+   ноды по каталожным полям (`VIDEO_FIELD_CATALOG`), можно поправить руками.
+3. Скачать пример CSV этого флоу и гонять `POST /api/video-runs`.
+
+### Как детектор находит ноду (важно при отладке маппинга)
+
+Проходы по очереди: **title** → **class_type** → **наличие входа**
+(`probe_field`) → легаси-дефолтный id. Спека забирает ноду только если поле
+реально **резолвится** на ней (`_resolve_field`): сначала `class_fields`
+(RandomNoise → `noise_seed`, PrimitiveFloat → `value`), потом dual-слайдер
+`Xi`/`Xf`, потом своё поле, потом `value`. Поэтому «правильно звучащий»
+заголовок больше не может привести к записи в несуществующий вход — раньше
+`Float (Duration)` получал мусорные `Xi`/`Xf`, а длина молча оставалась
+шаблонной. Захват — по паре **(нода, поле)**, так что одна нода законно тянет
+несколько полей: `MiniMaxH3ReferenceToVideo` → `width` + `height`,
+`BasicScheduler` → `steps` + `denoise` + `scheduler`.
+
+Отсюда правило: заголовки нод пиши по-английски и по смыслу. Русский заголовок
+детектор не поймёт (ключевые слова английские) — флоу всё равно поедет, но
+только через universal-колонки.
+
+### Референсное видео (ref2v-флоу)
+
+Колонка `input_video` (или universal-колонка `LoadVideo`) — имя файла в
+`inputs/` рана; раннер **сам заливает его на под** через
+`PodClient.upload_file` (эндпоинт `/upload/image` кладёт в `input` любой файл,
+не только картинку). Дропзона на `/video` принимает mp4/webm/mov наравне с фото.
+Пре-флайт `_missing_inputs` проверяет все файлы джобы, включая universal-колонки
+с фото и видео (`_video_job_input_files`), — забытый реф больше не роняет ран
+в середине.
+
+### Зарегистрированные видео-флоу
+
+| ключ | тип | модели | кастом-ноды |
+|---|---|---|---|
+| `mh3_ref2v` (`MH3.json`) | MiniMax H3 ref2v, видео+аудио, 4 реф-фото + реф-видео | `minimax_h3_ref2va_bf16` / `qwen3vl_32b_minimax_h3_bf16` / `minimax_h3_video_vae_fp16` + `minimax_h3_audio_vae_fp32`, лора `minimax_h3_ref2v_turbo_4step_v0.1` | `MiniMaxH3ReferenceToVideo`, `ComfyMathExpression`, `LoadVideo`/`GetVideoComponents`, `CreateVideo`/`SaveVideo`, `ImageStitch`, `VAEDecodeAudio` |
+
+MH3 отдаёт **два** файла на джобу: чистое видео (нода 92) и склейку
+side-by-side с оригиналом (нода 164) — `filename_prefix` проставляется обоим.
+Длительность живёт на `Float (Duration)` (секунды), кадры считает
+`ComfyMathExpression`; ширина/высота — на самой ноде `MiniMax H3 Reference to
+Video`.
