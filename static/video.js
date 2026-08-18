@@ -106,7 +106,7 @@ $("#btn-create").addEventListener("click", async () => {
     return;
   }
 
-  let { run_id, total, missing_inputs } = await r.json();
+  let { run_id, total, missing_inputs, missing_flows } = await r.json();
   // 2) upload photos in batches (robust to hundreds of files)
   if (photoFiles.length) {
     try {
@@ -124,7 +124,14 @@ $("#btn-create").addEventListener("click", async () => {
   $("#create-msg").textContent = "";
   await openRun(run_id, total);
 
-  if (missing_inputs && missing_inputs.length) {
+  if (missing_flows && missing_flows.length) {
+    const photosNote = (missing_inputs && missing_inputs.length)
+      ? ` Плюс не загружены фото: ${missing_inputs.length} шт.` : "";
+    showHint("error",
+      `⛔ В CSV есть флоу, которых нет на раннере: ${missing_flows.join("; ")}. ` +
+      `Догрузи JSON и зарегистрируй в Настройках, потом пересоздай прогон.` +
+      photosNote);
+  } else if (missing_inputs && missing_inputs.length) {
     showHint("warn",
       `⚠ Не загружены фото: ${missing_inputs.length} шт. ` +
       `Без них запуск упадёт. Дозагрузи и пересоздай прогон.`);
