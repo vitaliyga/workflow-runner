@@ -597,7 +597,16 @@ async def put_config(request: Request) -> dict[str, Any]:
         except yaml.YAMLError as e:
             raise HTTPException(400, f"workflows YAML parse error: {e}")
     save_config(cfg)
-    return {"ok": True}
+    # Предупреждаем СРАЗУ, а не при старте прогона: иначе про неверный адрес
+    # узнаёшь уже после того, как собрал CSV и залил видео. Именно сохранить
+    # настройки не мешаем — proxy-URL законен для ComfyUI на ДРУГОЙ машине, и
+    # блокировка мешала бы править несвязанные поля.
+    warnings: list[str] = []
+    suspect = _suspect_pod_urls(cfg.get("pods") or [])
+    if suspect:
+        warnings.append(_proxy_url_message(suspect))
+        log.warning("config saved with suspicious pod url(s): %s", "; ".join(suspect))
+    return {"ok": True, "warnings": warnings}
 
 
 @app.get("/api/config/workflows_yaml", dependencies=[Depends(auth_dep)])
@@ -1280,19 +1289,15 @@ def _validate_run(state: RunState) -> None:
         raise HTTPException(400, f"workflow(s) not registered: {', '.join(unknown)}")
     suspect = _suspect_pod_urls(pods)
     if suspect:
-        raise HTTPException(
-            400,
-            "адрес ComfyUI похож на внешний proxy-порт RunPod: "
-            + "; ".join(suspect)
-            + ". Снаружи ComfyUI отдаёт /history с 403, и джобы будут висеть до "
-              "таймаута. Укажи внутренний адрес — http://127.0.0.1:8188 "
-              "(или :8083, смотри, на каком порту слушает ComfyUI).")
+        raise HTTPException(400, _proxy_url_message(suspect))
 
 
 # Хост, который заведомо не является ComfyUI: внешний proxy RunPod. Раннер и
 # ComfyUI живут на одном поде, ходить надо внутрь — снаружи /history даёт 403,
 # а раннер видит это как «результата ещё нет» и ждёт до таймаута.
 _PROXY_HOST_MARK = ".proxy.runpod.net"
+# Где обычно живёт ComfyUI: 8188 — дефолт, 8083/8189 — типовые на этих подах.
+_COMFY_PORT_CANDIDATES = (8188, 8083, 8189, 8000)
 
 
 def _suspect_pod_urls(pods: list[dict[str, Any]]) -> list[str]:
@@ -1303,6 +1308,44 @@ def _suspect_pod_urls(pods: list[dict[str, Any]]) -> list[str]:
         if _PROXY_HOST_MARK in url:
             out.append(f"{p.get('name') or '(без имени)'} -> {url}")
     return out
+
+
+def _detect_local_comfy_url() -> str | None:
+    """Ищем локальный ComfyUI, чтобы подсказать РЕАЛЬНЫЙ адрес, а не абстрактный.
+
+    Абстрактная подсказка «укажи :8188 или :8083» заставляет угадывать; порт
+    отличается от пода к поду. Пробуем /system_stats на кандидатах — это дешёвый
+    GET, и отвечает на него только настоящий ComfyUI.
+    """
+    import socket
+    import urllib.request
+    for port in _COMFY_PORT_CANDIDATES:
+        with socket.socket() as s:
+            s.settimeout(0.3)
+            if s.connect_ex(("127.0.0.1", port)) != 0:
+                continue
+        url = f"http://127.0.0.1:{port}"
+        try:
+            with urllib.request.urlopen(f"{url}/system_stats", timeout=2) as r:
+                if r.status == 200:
+                    return url
+        except Exception:
+            continue
+    return None
+
+
+def _proxy_url_message(suspect: list[str]) -> str:
+    """Сообщение об ошибке с готовым к вставке адресом, если ComfyUI найден."""
+    found = _detect_local_comfy_url()
+    hint = (f"Укажи внутренний адрес: {found} — именно там сейчас отвечает "
+            f"ComfyUI на этом поде." if found else
+            "Укажи внутренний адрес вида http://127.0.0.1:<порт ComfyUI> "
+            "(посмотреть порт: ss -tlnp | grep python).")
+    return ("адрес ComfyUI похож на внешний proxy-порт RunPod: "
+            + "; ".join(suspect)
+            + ". Снаружи ComfyUI проксируется через nginx и на сбое отдаёт 403 — "
+              "раннер примет это за «результат ещё не готов» и джоба будет висеть. "
+            + hint)
 
 
 def _any_run_active(exclude: str | None = None) -> bool:
