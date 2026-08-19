@@ -70,7 +70,12 @@ from video_workflow_builder import (
 # bootstrap
 
 ROOT = Path(__file__).parent
-STORAGE = ROOT / "storage"
+# STORAGE вынесен в env, потому что на RunPod entrypoint пода при каждом старте
+# делает `rm -rf /workspace/workflow-runner && git clone` — всё, что лежит внутри
+# репозитория, пропадает вместе с прогонами (и незакоммиченными jobs/*.json).
+# RUNNER_STORAGE=/workspace/runner-state переносит состояние наружу, и прогон
+# переживает рестарт пода. По умолчанию — прежний путь, поведение не меняется.
+STORAGE = Path(os.environ.get("RUNNER_STORAGE") or (ROOT / "storage"))
 RUNS = STORAGE / "runs"
 
 
@@ -345,7 +350,10 @@ class RunState:
         self._lock = asyncio.Lock()
 
     def snapshot(self) -> dict[str, Any]:
-        counts = {"pending": 0, "running": 0, "done": 0, "failed": 0}
+        # `stalled` — джоба отправлена, но ComfyUI не отвечает (см. _video_handle).
+        # Ключ объявлен явно, чтобы UI всегда получал его в counts, даже когда
+        # таких джоб нет.
+        counts = {"pending": 0, "running": 0, "stalled": 0, "done": 0, "failed": 0}
         for j in self.jobs:
             counts[j["status"]] = counts.get(j["status"], 0) + 1
         return {
@@ -1081,11 +1089,19 @@ def _lora_folder_tag(load_loras_json: str) -> str:
     return "__".join(parts)
 
 
-def _stamp_job_timing(job: dict[str, Any], status: str, now: float) -> None:
+def _stamp_job_timing(job: dict[str, Any], status: str, now: float,
+                      prev_status: str | None = None) -> None:
     """Per-job generation timing. Stamps the (latest) attempt start on
-    'running' and computes `duration` (seconds) on 'done'/'failed'."""
+    'running' and computes `duration` (seconds) on 'done'/'failed'.
+
+    Тонкость: в 'running' джоба входит и как новая попытка (retry — время старта
+    надо перезаписать), и как возврат из 'stalled', когда ComfyUI снова начал
+    отвечать. Во втором случае перезапись `started_ts` украла бы уже отработанное
+    время из `duration`, поэтому переход именно `stalled -> running` времени не
+    трогает; все остальные входы в 'running' штампуются как раньше."""
     if status == "running":
-        job["started_ts"] = now
+        if prev_status != "stalled":
+            job["started_ts"] = now
     elif status in ("done", "failed"):
         start = job.get("started_ts")
         if start:
@@ -1254,13 +1270,39 @@ def _validate_run(state: RunState) -> None:
     if missing:
         raise HTTPException(400, f"missing input photos: {missing}")
     cfg = load_config()
-    if not (cfg.get("pods") or []):
+    pods = cfg.get("pods") or []
+    if not pods:
         raise HTTPException(400, "no pods configured (see /settings)")
     registered = (cfg.get("workflows") or {}).get("workflows") or {}
     unknown = sorted({j.get("workflow") for j in state.jobs
                       if j.get("workflow") and j["workflow"] not in registered})
     if unknown:
         raise HTTPException(400, f"workflow(s) not registered: {', '.join(unknown)}")
+    suspect = _suspect_pod_urls(pods)
+    if suspect:
+        raise HTTPException(
+            400,
+            "адрес ComfyUI похож на внешний proxy-порт RunPod: "
+            + "; ".join(suspect)
+            + ". Снаружи ComfyUI отдаёт /history с 403, и джобы будут висеть до "
+              "таймаута. Укажи внутренний адрес — http://127.0.0.1:8188 "
+              "(или :8083, смотри, на каком порту слушает ComfyUI).")
+
+
+# Хост, который заведомо не является ComfyUI: внешний proxy RunPod. Раннер и
+# ComfyUI живут на одном поде, ходить надо внутрь — снаружи /history даёт 403,
+# а раннер видит это как «результата ещё нет» и ждёт до таймаута.
+_PROXY_HOST_MARK = ".proxy.runpod.net"
+
+
+def _suspect_pod_urls(pods: list[dict[str, Any]]) -> list[str]:
+    """Список описаний подозрительных URL пода (пустой = всё в порядке)."""
+    out: list[str] = []
+    for p in pods:
+        url = str(p.get("url") or "")
+        if _PROXY_HOST_MARK in url:
+            out.append(f"{p.get('name') or '(без имени)'} -> {url}")
+    return out
 
 
 def _any_run_active(exclude: str | None = None) -> bool:
@@ -1337,7 +1379,7 @@ async def _execute_run(state: RunState) -> None:
     except Exception as e:
         log.exception("run %s failed to launch: %s", state.run_id, e)
         for j in state.jobs:
-            if j["status"] in ("pending", "running"):
+            if j["status"] in ("pending", "running", "stalled"):
                 j["status"] = "failed"
                 j["error"] = f"launch failed: {e}"
         state.finished_at = state.finished_at or time.time()
@@ -1568,8 +1610,9 @@ async def cancel_run(run_id: str) -> dict[str, Any]:
         RUN_QUEUE.remove(run_id)
     await state.emit("run_cancelled")
     # Mark not-yet-finished jobs as cancelled (running ones get aborted below).
+    # `stalled` — тоже незавершённая джоба: без неё отмена оставила бы её висеть.
     for j in state.jobs:
-        if j["status"] in ("pending", "running"):
+        if j["status"] in ("pending", "running", "stalled"):
             j["status"] = "failed"
             j["error"] = "cancelled"
     # Abort the in-flight generation on the pod(s) — /interrupt stops ComfyUI's
@@ -1925,8 +1968,37 @@ async def _video_handle(
     # Video generation (esp. long clips / 22B models) easily exceeds the 600s
     # image default → раннер ложно помечал failed. 30 min, env-tunable.
     wait_timeout = float(os.environ.get("VIDEO_WAIT_TIMEOUT_S", "1800"))
+    # Наблюдаемость ожидания: пока ComfyUI считает, джоба стоит в `running` и
+    # снаружи это неотличимо от «повисло». Раз в UNREACHABLE_LOG_EVERY опросов
+    # пишем, сколько ждём, и помечаем джобу `stalled`, если ComfyUI отвалился —
+    # статус виден в UI и в /status, а не только в логе.
+    waited = {"polls": 0, "stalled": False}
+
+    def _on_poll(poll_state: str, detail: str | None) -> None:
+        waited["polls"] += 1
+        secs = waited["polls"] * 2
+        if poll_state == "unreachable":
+            if not waited["stalled"]:
+                waited["stalled"] = True
+                log.warning("[%s] video job %d: ComfyUI не отвечает (%s) — жду",
+                            client.cfg.name, idx, detail)
+                asyncio.create_task(_video_set_status(
+                    state, idx, "stalled", pod=client.cfg.name,
+                    error=f"ComfyUI не отвечает: {detail}"))
+        else:
+            if waited["stalled"]:
+                waited["stalled"] = False
+                log.info("[%s] video job %d: ComfyUI снова отвечает",
+                         client.cfg.name, idx)
+                asyncio.create_task(_video_set_status(
+                    state, idx, "running", pod=client.cfg.name, error=None))
+            if secs and secs % 120 == 0:
+                log.info("[%s] video job %d: жду результат, %d мин",
+                         client.cfg.name, idx, secs // 60)
+
     entry = await client.wait(prompt_id, timeout=wait_timeout,
-                              should_cancel=lambda: state.cancelled)
+                              should_cancel=lambda: state.cancelled,
+                              on_poll=_on_poll)
 
     # Download all outputs (video files). Top-level folder = run date (DD-MM),
     # then the previous per-job layout. This propagates everywhere rel paths
@@ -1993,9 +2065,10 @@ async def _video_set_status(state: RunState, idx: int, status: str, **extra: Any
     for j in state.jobs:
         if j["idx"] == idx:
             now = time.time()
+            prev_status = j.get("status")
             j["status"] = status
             j["updated_at"] = now
-            _stamp_job_timing(j, status, now)
+            _stamp_job_timing(j, status, now, prev_status)
             for k, v in extra.items():
                 j[k] = v
             await state.emit("job_updated", job=j)

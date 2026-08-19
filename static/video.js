@@ -235,12 +235,13 @@ function updateCounts(c = {}, total = 0) {
     <span>всего: <b>${total}</b></span>
     <span class="pending">pending: <b>${c.pending || 0}</b></span>
     <span class="running">running: <b>${c.running || 0}</b></span>
+    ${c.stalled ? `<span class="failed">stalled: <b>${c.stalled}</b></span>` : ""}
     <span class="done">done: <b>${c.done || 0}</b></span>
     <span class="failed">failed: <b>${c.failed || 0}</b></span>`;
 }
 
 function refreshCountsFromTable() {
-  const c = { pending: 0, running: 0, done: 0, failed: 0 };
+  const c = { pending: 0, running: 0, stalled: 0, done: 0, failed: 0 };
   $$("#jobs tbody td[class^=s-]").forEach(td => {
     const s = td.className.replace("s-", "");
     if (s in c) c[s]++;

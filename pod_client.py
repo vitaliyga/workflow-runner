@@ -88,24 +88,63 @@ class PodClient:
             pass
 
     async def wait(self, prompt_id: str, poll_interval: float = 2.0,
-                   timeout: float = 600.0, should_cancel=None) -> dict[str, Any]:
+                   timeout: float = 600.0, should_cancel=None,
+                   unreachable_limit: int = 30, on_poll=None) -> dict[str, Any]:
         """Polls /history/<id> until the prompt finishes. Returns the history entry.
 
         If `should_cancel()` returns true, stops waiting early (caller должен был
-        отправить /interrupt, чтобы реально прервать генерацию)."""
-        deadline = asyncio.get_event_loop().time() + timeout
+        отправить /interrupt, чтобы реально прервать генерацию).
+
+        Отдельно от таймаута отслеживается **достижимость** ComfyUI. Раньше
+        упавший/перезапущенный ComfyUI (или прокси, отдающий 403) выглядел ровно
+        как «результата ещё нет»: джоба молча висела в `running` все 30 минут, в
+        логе — ни строчки. Теперь `unreachable_limit` подряд неудачных опросов
+        (сеть, 5xx, 403, битый JSON) завершают ожидание внятной ошибкой, а
+        очередь идёт дальше вместо простоя на полчаса.
+
+        `on_poll(state, detail)` — необязательный колбэк для наблюдаемости:
+        вызывается на каждой итерации со state 'ok'/'unreachable'/'pending'.
+        """
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + timeout
         url = f"{self.cfg.url}/history/{prompt_id}"
+        unreachable = 0
+        last_error: str | None = None
         while True:
             if should_cancel and should_cancel():
                 raise PodError(f"prompt {prompt_id} cancelled")
-            async with self.session.get(url, headers=self._headers) as r:
-                body = await r.json() if r.status == 200 else {}
-            entry = body.get(prompt_id)
+
+            entry = None
+            try:
+                async with self.session.get(url, headers=self._headers) as r:
+                    if r.status == 200:
+                        body = await r.json(content_type=None)
+                        entry = body.get(prompt_id) if isinstance(body, dict) else None
+                        unreachable = 0
+                    else:
+                        # 403 — типовой признак «ходим снаружи через proxy»;
+                        # 5xx/404 — ComfyUI ещё не поднялся после рестарта.
+                        unreachable += 1
+                        last_error = f"HTTP {r.status}"
+            except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as e:
+                unreachable += 1
+                last_error = f"{type(e).__name__}: {e}"
+
             if entry and entry.get("status", {}).get("completed"):
                 return entry
             if entry and entry.get("status", {}).get("status_str") == "error":
                 raise PodError(f"prompt {prompt_id} errored: {entry.get('status')}")
-            if asyncio.get_event_loop().time() > deadline:
+
+            if on_poll:
+                on_poll("unreachable" if unreachable else "pending", last_error)
+
+            if unreachable >= unreachable_limit:
+                raise PodError(
+                    f"ComfyUI недостижим: {unreachable} неудачных опросов подряд "
+                    f"({last_error}). Проверь, что он жив и что в настройках указан "
+                    f"внутренний адрес (http://127.0.0.1:8188 / :8083), а не внешний "
+                    f"proxy-порт. prompt {prompt_id}")
+            if loop.time() > deadline:
                 raise PodError(f"prompt {prompt_id} timed out after {timeout}s")
             await asyncio.sleep(poll_interval)
 
