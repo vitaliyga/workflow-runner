@@ -98,6 +98,10 @@ def load_jobs(path: Path) -> list[Job]:
     }
     with path.open(newline="", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f, delimiter=delim)
+        # Дефолтный ключ — только когда колонки workflow нет вовсе. Пустая
+        # ячейка при существующей колонке — забытый флоу: оставляем "" и
+        # роняем на пре-флайте вместо молчаливой подмены sample_image_v1.
+        has_wf_col = "workflow" in (reader.fieldnames or [])
         for row in reader:
             images = _row_images(row)
             first_image = images[0] if images else ""
@@ -107,7 +111,8 @@ def load_jobs(path: Path) -> list[Job]:
                 if k and k not in known and (v or "").strip()
             }
             jobs.append(Job(
-                workflow=_f(row, "workflow", "sample_image_v1") or "sample_image_v1",
+                workflow=(_f(row, "workflow").strip() if has_wf_col
+                          else "sample_image_v1"),
                 scenario=_f(row, "scenario"),
                 girl=_f(row, "girl"),
                 lora_name=_f(row, "lora_name"),

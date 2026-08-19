@@ -1274,10 +1274,34 @@ def _validate_run(state: RunState) -> None:
     if not pods:
         raise HTTPException(400, "no pods configured (see /settings)")
     registered = (cfg.get("workflows") or {}).get("workflows") or {}
+    # Пустой ключ бывает только при заполненной не для всех строк колонке
+    # workflow (лоадеры подставляют дефолт лишь когда колонки нет вовсе).
+    # Такая строка молча уехала бы на дефолтный/legacy граф и сломалась в
+    # середине рана — роняем сразу с номерами строк.
+    empty_rows = [str(j["idx"]) for j in state.jobs
+                  if not (j.get("workflow") or "").strip()]
+    if empty_rows:
+        raise HTTPException(
+            400, "пустая ячейка workflow в строках CSV: "
+            + ", ".join(empty_rows[:20]) + " — заполни ключ флоу.")
     unknown = sorted({j.get("workflow") for j in state.jobs
                       if j.get("workflow") and j["workflow"] not in registered})
     if unknown:
         raise HTTPException(400, f"workflow(s) not registered: {', '.join(unknown)}")
+    # Зарегистрированный ключ ещё не значит, что JSON-шаблон лежит на диске
+    # (в конфиг его дописывают руками, файл заливают отдельно). Без этой
+    # проверки фото-ран падает при билде, а видео-ран молча уезжает на
+    # legacy-шаблон и ломается в середине генерации.
+    broken = []
+    for key in sorted({j["workflow"] for j in state.jobs if j.get("workflow")}):
+        spec = registered[key]
+        tmpl = spec.get("template")
+        if not tmpl or not _resolve_workflow_template_path(str(tmpl)).exists():
+            broken.append(f"{key} → {tmpl or '(template не задан)'}")
+    if broken:
+        raise HTTPException(
+            400, "у флоу нет JSON-файла шаблона на раннере: "
+            + "; ".join(broken) + ". Загрузите файл в Настройках.")
     # Проверки адреса пода здесь нет намеренно: раннер не решает за пользователя,
     # какой URL правильный (proxy-адрес законен, например для ComfyUI на другой
     # машине). Недостижимый ComfyUI ловится уже во время ожидания результата —
@@ -1661,8 +1685,13 @@ def _resolve_video_flows(cfg: dict[str, Any], jobs: list[VideoJob]) -> dict[str,
                 template = json.loads(tmpl_path.read_text())
                 mapping = spec.get("video_fields") or default_video_mapping(template)
                 flows[key] = (template, mapping)
-                continue
-        # fallback to legacy template
+            else:
+                # Зарегистрирован, но JSON пропал с диска. Раньше тут молча
+                # подставлялся legacy-шаблон — генерация шла не тем графом и
+                # ломалась в середине рана. Теперь это ошибка запуска.
+                unresolved.append(f"{key} (нет файла {spec['template']})")
+            continue
+        # fallback to legacy template — только для незарегистрированных ключей
         if VIDEO_WORKFLOW_TEMPLATE_PATH.exists():
             template = load_video_template(VIDEO_WORKFLOW_TEMPLATE_PATH)
             flows[key] = (template, default_video_mapping(template))
@@ -1671,21 +1700,21 @@ def _resolve_video_flows(cfg: dict[str, Any], jobs: list[VideoJob]) -> dict[str,
     if unresolved:
         raise HTTPException(
             400,
-            "не зарегистрированы видео-флоу для CSV-колонки workflow: "
+            "видео-флоу из CSV-колонки workflow недоступны: "
             + ", ".join(sorted(unresolved))
-            + ". Загрузите и зарегистрируйте их в Settings.",
+            + ". Загрузите JSON и зарегистрируйте их в Settings.",
         )
     return flows
 
 
 def _missing_video_flows(cfg: dict[str, Any], jobs: list[VideoJob]) -> list[str]:
-    """Workflow keys from the CSV that can't run: not registered, or the
-    registered template JSON is gone from disk. Empty key is the legacy
-    single-template path and isn't flagged (matches _validate_run)."""
+    """Workflow keys from the CSV that can't run: empty cell, not registered,
+    or the registered template JSON is gone from disk (matches _validate_run)."""
     registered = (cfg.get("workflows") or {}).get("workflows") or {}
     missing: set[str] = set()
     for key in {(j.workflow or "").strip() for j in jobs}:
         if not key:
+            missing.add("(пустая ячейка workflow — заполни ключ флоу)")
             continue
         spec = registered.get(key)
         if not spec:

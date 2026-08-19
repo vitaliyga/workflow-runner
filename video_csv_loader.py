@@ -136,6 +136,11 @@ def load_video_jobs(path: Path) -> list[VideoJob]:
     delim = _detect_delimiter(path)
     with path.open(newline="", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f, delimiter=delim)
+        # Дефолтный ключ — только когда колонки workflow нет вовсе (легаси
+        # single-template CSV). Пустая ячейка при существующей колонке —
+        # забытый флоу: оставляем "" и роняем на пре-флайте, а не молча
+        # подменяем графом video_ltx.
+        has_wf_col = "workflow" in (reader.fieldnames or [])
         for row in reader:
             extra = {
                 k: (v or "").strip()
@@ -143,7 +148,8 @@ def load_video_jobs(path: Path) -> list[VideoJob]:
                 if k and k not in _KNOWN and (v or "").strip()
             }
             jobs.append(VideoJob(
-                workflow=_f(row, "workflow", "video_ltx") or "video_ltx",
+                workflow=(_f(row, "workflow").strip() if has_wf_col
+                          else "video_ltx"),
                 scenario=_f(row, "scenario"),
                 girl=_f(row, "girl"),
                 input_image=_f(row, "input_image", "").strip(),
