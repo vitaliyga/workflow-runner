@@ -116,6 +116,53 @@
     white-space: nowrap;
   }
 
+  /* Per-job progress bar + batch timer */
+  .prog { min-width: 130px; }
+  .prog-bar {
+    position: relative;
+    height: 8px;
+    border-radius: 999px;
+    background: rgba(168, 85, 247, 0.15);
+    overflow: hidden;
+  }
+  .prog-bar span {
+    display: block;
+    height: 100%;
+    border-radius: 999px;
+    background: linear-gradient(90deg, var(--vid-accent-dark), var(--vid-accent));
+    transition: width 0.4s ease;
+  }
+  .prog-bar.indeterminate span {
+    width: 35%;
+    animation: prog-slide 1.6s ease-in-out infinite;
+  }
+  @keyframes prog-slide {
+    0%   { transform: translateX(-100%); }
+    100% { transform: translateX(300%); }
+  }
+  .prog-meta {
+    display: block;
+    margin-top: 4px;
+    font-size: 0.68rem;
+    color: #9ca3af;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .prog-pct { color: #c4b5fd; font-weight: 600; }
+
+  #batch-info {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 18px;
+    align-items: center;
+    margin: 10px 0 4px;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+  }
+  #batch-info b { color: #e9d5ff; font-weight: 600; }
+  #batch-info .eta-strong { color: #86efac; }
+
   /* History section */
   #history h2::before { content: "📺 "; }
 
@@ -217,6 +264,7 @@
     <h2>2. Прогресс <small id="run-id" class="muted"></small></h2>
     <div id="hint" class="hint hidden"></div>
     <div id="counts" class="counts"></div>
+    <div id="batch-info"></div>
     <div class="actions">
       <button id="btn-start">▶ Запустить генерацию</button>
       <button id="btn-queue" class="ghost">⏳ Поставить в очередь</button>
@@ -232,6 +280,7 @@
         <th>Размер</th>
         <th>Длина</th>
         <th>Статус</th>
+        <th>Прогресс</th>
         <th>Время</th>
         <th>Файлы</th>
       </tr></thead>

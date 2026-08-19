@@ -63,3 +63,130 @@ workflows:
     save_images: ["620", "634"]
     lora_loaders:
       - node: "621"
+
+  # MiniMax H3 ref2v — ВИДЕО флоу (is_video), 4 реф-фото + реф-видео с аудио.
+  # Лежит здесь, а не только в storage/config.yaml, потому что entrypoint пода
+  # делает `rm -rf /workspace/workflow-runner` + git clone при каждом старте:
+  # storage/ в .gitignore, и регистрация умирала вместе с подом. Отсюда чистый
+  # клон поднимает флоу сам (_bootstrap_default_config читает этот файл).
+  #
+  # Колонки CSV для реф-фото названы по заголовкам нод LoadImage
+  # («Загрузить изображение#137/#176/#177/#178» = ref_image_0..3 ноды 136).
+  # Переименуете ноды в ComfyUI — поменяются и имена колонок.
+  MINIMAX_H3:
+    template: jobs/MINIMAX_H3.json
+    is_video: true
+    video_fields:
+      prompt_positive:
+        node: '138'
+        field: value
+      video_length_seconds:
+        node: '132'
+        field: value
+      steps:
+        node: '124'
+        field: steps
+      denoise:
+        node: '124'
+        field: denoise
+      scheduler:
+        node: '124'
+        field: scheduler
+      sampler_name:
+        node: '123'
+        field: sampler_name
+      lora_name:
+        node: '144'
+        field: lora_name
+      lora_strength:
+        node: '144'
+        field: strength_model
+      input_image:
+        node: '137'
+        field: image
+      input_video:
+        node: '149'
+        field: file
+      seed:
+        node: '129'
+        field: noise_seed
+      diffusion_model_name:
+        node: '127'
+        field: unet_name
+      video_width:
+        node: '136'
+        field: width
+      video_height:
+        node: '136'
+        field: height
+    universal_columns:
+    - label: Случайный шум
+      node: '129'
+      field: noise_seed
+      image: false
+      video: false
+    - label: Создать видео.bit_depth#130
+      node: '130'
+      field: bit_depth
+      image: false
+      video: false
+    - label: Создать видео.fps#130
+      node: '130'
+      field: fps
+      image: false
+      video: false
+    - label: Float (Duration)
+      node: '132'
+      field: value
+      image: false
+      video: false
+    - label: MiniMax H3 Reference to Video.height
+      node: '136'
+      field: height
+      image: false
+      video: false
+    - label: MiniMax H3 Reference to Video.ref_image_size
+      node: '136'
+      field: ref_image_size
+      image: false
+      video: false
+    - label: Загрузить изображение#137
+      node: '137'
+      field: image
+      image: true
+      video: false
+    - label: Input Text (Prompt)
+      node: '138'
+      field: value
+      image: false
+      video: false
+    - label: Загрузчик LoRA (Только модель).lora_name
+      node: '144'
+      field: lora_name
+      image: false
+      video: false
+    - label: Загрузчик LoRA (Только модель).strength_model
+      node: '144'
+      field: strength_model
+      image: false
+      video: false
+    - label: Загрузить видео
+      node: '149'
+      field: file
+      image: false
+      video: true
+    - label: Загрузить изображение#176
+      node: '176'
+      field: image
+      image: true
+      video: false
+    - label: Загрузить изображение#177
+      node: '177'
+      field: image
+      image: true
+      video: false
+    - label: Загрузить изображение#178
+      node: '178'
+      field: image
+      image: true
+      video: false

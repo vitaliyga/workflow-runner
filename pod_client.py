@@ -87,40 +87,80 @@ class PodClient:
         except Exception:
             pass
 
+    async def queue_ids(self) -> set[str] | None:
+        """prompt_id'ы, которые ComfyUI сейчас считает или держит в очереди.
+
+        None — если /queue не ответил (тогда вызывающий не делает выводов).
+        Нужно для «пропала ли задача»: см. lost-детектор в `wait`.
+        """
+        try:
+            async with self.session.get(f"{self.cfg.url}/queue",
+                                        headers=self._headers) as r:
+                if r.status != 200:
+                    return None
+                body = await r.json(content_type=None)
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+            return None
+        if not isinstance(body, dict):
+            return None
+        ids: set[str] = set()
+        for key in ("queue_running", "queue_pending"):
+            for item in body.get(key) or []:
+                # элемент очереди — список [number, prompt_id, prompt, extra, outputs]
+                if isinstance(item, (list, tuple)) and len(item) > 1:
+                    ids.add(str(item[1]))
+        return ids
+
     async def wait(self, prompt_id: str, poll_interval: float = 2.0,
-                   timeout: float = 600.0, should_cancel=None,
-                   unreachable_limit: int = 30, on_poll=None) -> dict[str, Any]:
+                   timeout: float | None = None, should_cancel=None,
+                   unreachable_limit: int = 30, on_poll=None,
+                   lost_limit: int = 3, lost_check_every: int = 15,
+                   ) -> dict[str, Any]:
         """Polls /history/<id> until the prompt finishes. Returns the history entry.
+
+        `timeout=None` (или <= 0) — ждать столько, сколько нужно: медленный под
+        (VRAM-своп, 22B-модели, длинный клип) может считать одно видео часами, и
+        глухой таймаут просто убивал уже почти готовую генерацию. Вместо часов по
+        будильнику здесь два точных признака беды, которые ловят настоящие
+        поломки, а не «долго считает»:
+
+        * **недостижимость** — `unreachable_limit` подряд неудачных опросов
+          (сеть, 5xx, 403, битый JSON). Упавший/перезапущенный ComfyUI или прокси
+          с 403 выглядят ровно как «результата ещё нет», поэтому раньше джоба
+          молча висела до таймаута;
+        * **потеря задачи** — раз в `lost_check_every` опросов сверяемся с
+          /queue: если prompt_id не считается, не стоит в очереди и не попал в
+          /history, значит его сняли снаружи (interrupt, рестарт, чужой clear) и
+          результата не будет никогда. `lost_limit` подряд таких проверок →
+          ошибка, очередь идёт дальше.
 
         If `should_cancel()` returns true, stops waiting early (caller должен был
         отправить /interrupt, чтобы реально прервать генерацию).
-
-        Отдельно от таймаута отслеживается **достижимость** ComfyUI. Раньше
-        упавший/перезапущенный ComfyUI (или прокси, отдающий 403) выглядел ровно
-        как «результата ещё нет»: джоба молча висела в `running` все 30 минут, в
-        логе — ни строчки. Теперь `unreachable_limit` подряд неудачных опросов
-        (сеть, 5xx, 403, битый JSON) завершают ожидание внятной ошибкой, а
-        очередь идёт дальше вместо простоя на полчаса.
 
         `on_poll(state, detail)` — необязательный колбэк для наблюдаемости:
         вызывается на каждой итерации со state 'ok'/'unreachable'/'pending'.
         """
         loop = asyncio.get_event_loop()
-        deadline = loop.time() + timeout
+        unlimited = timeout is None or timeout <= 0
+        deadline = None if unlimited else loop.time() + float(timeout)
         url = f"{self.cfg.url}/history/{prompt_id}"
         unreachable = 0
+        lost = 0
+        polls = 0
         last_error: str | None = None
         while True:
             if should_cancel and should_cancel():
                 raise PodError(f"prompt {prompt_id} cancelled")
 
             entry = None
+            reachable = False
             try:
                 async with self.session.get(url, headers=self._headers) as r:
                     if r.status == 200:
                         body = await r.json(content_type=None)
                         entry = body.get(prompt_id) if isinstance(body, dict) else None
                         unreachable = 0
+                        reachable = True
                     else:
                         # 403 — типовой признак «ходим снаружи через proxy»;
                         # 5xx/404 — ComfyUI ещё не поднялся после рестарта.
@@ -144,9 +184,128 @@ class PodClient:
                     f"({last_error}). Проверь, что он жив и что в настройках указан "
                     f"внутренний адрес (http://127.0.0.1:8188 / :8083), а не внешний "
                     f"proxy-порт. prompt {prompt_id}")
-            if loop.time() > deadline:
+
+            # Задача пропала? Проверяем редко (это лишний запрос) и только когда
+            # ComfyUI отвечает — иначе пустой /queue во время рестарта соврал бы.
+            polls += 1
+            if reachable and entry is None and polls % lost_check_every == 0:
+                ids = await self.queue_ids()
+                if ids is None:
+                    pass                      # /queue не ответил — не судим
+                elif prompt_id in ids:
+                    lost = 0
+                else:
+                    lost += 1
+                    if lost >= lost_limit:
+                        raise PodError(
+                            f"prompt {prompt_id} исчез из ComfyUI: не в очереди и "
+                            f"не в /history ({lost} проверки подряд). Скорее всего "
+                            f"его прервали или ComfyUI перезапустился.")
+            elif entry is not None:
+                lost = 0
+
+            if deadline is not None and loop.time() > deadline:
                 raise PodError(f"prompt {prompt_id} timed out after {timeout}s")
             await asyncio.sleep(poll_interval)
+
+    # -- live progress -----------------------------------------------------
+    @staticmethod
+    def progress_from_ws(msg: dict[str, Any], prompt_id: str) -> dict[str, Any] | None:
+        """Достаёт прогресс из одного websocket-сообщения ComfyUI.
+
+        ComfyUI 0.3x присылает два вида, оба — только тому client_id, который
+        отправил промт (поэтому подписка идёт с тем же `self.client_id`, что и
+        `submit`):
+
+            progress        {value, max, prompt_id, node}
+            progress_state  {prompt_id, nodes: {id: {value, max, state, ...}}}
+
+        Возвращает подмножество ключей value/max/node/nodes_done/nodes_seen —
+        или None, если сообщение не про прогресс (или про чужой промт).
+        """
+        kind = msg.get("type")
+        data = msg.get("data")
+        if not isinstance(data, dict):
+            return None
+
+        if kind == "progress":
+            pid = data.get("prompt_id")
+            if pid is not None and str(pid) != prompt_id:
+                return None
+            try:
+                value = float(data["value"])
+                maximum = float(data["max"])
+            except (KeyError, TypeError, ValueError):
+                return None
+            if maximum <= 0:
+                return None
+            return {"value": value, "max": maximum,
+                    "node": str(data.get("node") or "")}
+
+        if kind == "progress_state":
+            pid = data.get("prompt_id")
+            if pid is not None and str(pid) != prompt_id:
+                return None
+            nodes = data.get("nodes")
+            if not isinstance(nodes, dict):
+                return None
+            out: dict[str, Any] = {
+                "nodes_done": sum(1 for n in nodes.values()
+                                  if isinstance(n, dict) and n.get("state") == "finished"),
+                "nodes_seen": len(nodes),
+            }
+            # Внутришаговый прогресс берём у работающей ноды с осмысленным max
+            # (сэмплер: max = число шагов; у обычной ноды max = 1 — не интересно).
+            for n in nodes.values():
+                if not isinstance(n, dict) or n.get("state") != "running":
+                    continue
+                try:
+                    value = float(n["value"])
+                    maximum = float(n["max"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if maximum > 1:
+                    out.update({"value": value, "max": maximum,
+                                "node": str(n.get("display_node_id")
+                                            or n.get("node_id") or "")})
+                    break
+            return out
+
+        return None
+
+    async def watch_progress(self, prompt_id: str, on_progress,
+                             reconnect_delay: float = 3.0) -> None:
+        """Подписывается на websocket ComfyUI и зовёт `on_progress(info)`.
+
+        Best-effort и намеренно бесконечный: задача живёт рядом с `wait`, её
+        отменяет вызывающий. Любая ошибка сокета — это лишь потеря телеметрии,
+        поэтому она не должна валить генерацию, которая идёт нормально: сокет
+        просто переподключается.
+        """
+        params = {"clientId": self.client_id}
+        while True:
+            try:
+                async with self.session.ws_connect(f"{self.cfg.url}/ws",
+                                                   params=params,
+                                                   headers=self._headers,
+                                                   heartbeat=30.0) as ws:
+                    async for msg in ws:
+                        if msg.type is not aiohttp.WSMsgType.TEXT:
+                            continue
+                        try:
+                            payload = json.loads(msg.data)
+                        except ValueError:
+                            continue
+                        if not isinstance(payload, dict):
+                            continue
+                        info = self.progress_from_ws(payload, prompt_id)
+                        if info:
+                            on_progress(info)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+            await asyncio.sleep(reconnect_delay)
 
     async def download(self, filename: str, subfolder: str, type_: str,
                        dest: Path) -> None:

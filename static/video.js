@@ -163,6 +163,8 @@ async function openRun(runId) {
                         { headers: authHeaders() }).then(r => r.json());
   s.jobs.forEach(j => upsertRow(j));
   updateCounts(s.counts, s.total);
+  batchFinished = !!s.finished_at;
+  startBatchTimer(runId);
 
   if (evtSrc) evtSrc.close();
   evtSrc = new EventSource(`/api/runs/${runId}/events`);
@@ -176,6 +178,8 @@ async function openRun(runId) {
       refreshCountsFromTable();
     } else if (ev.type === "run_finished" || ev.type === "run_cancelled") {
       refreshCountsFromTable();
+      batchFinished = true;
+      renderBatchInfo();
       loadHistory();
     }
   };
@@ -217,17 +221,98 @@ function upsertRow(j) {
     <td>${dims ? `<span class="video-badge">${esc(dims)}</span>` : ""}</td>
     <td>${dur ? `<span class="video-badge">${esc(dur)}</span>` : ""}</td>
     <td class="s-${status}">${status}${j.error ? `<br><small>${esc(j.error)}</small>` : ""}</td>
+    <td class="prog">${renderProgress(j, status)}</td>
     <td class="dur">${fmtDuration(j.duration)}</td>
     <td class="files">${files}</td>`;
 }
 
-// Per-job generation time → "42с" / "1м 05с".
+// Прогресс одной генерации. Пока ComfyUI не прислал ни одного тика (грузит
+// модели в VRAM — на медленном поде это минуты), показываем бегущую полосу:
+// «работает, но процента ещё нет» — это не то же самое, что 0 %.
+function renderProgress(j, status) {
+  const p = j.progress || {};
+  if (status === "done") return `<span class="prog-pct">100%</span>`;
+  if (status !== "running" && status !== "stalled") return "";
+
+  const pct = (typeof p.percent === "number") ? p.percent : null;
+  const bar = pct == null
+    ? `<div class="prog-bar indeterminate"><span></span></div>`
+    : `<div class="prog-bar"><span style="width:${pct.toFixed(1)}%"></span></div>`;
+
+  const bits = [];
+  if (pct != null) bits.push(`<span class="prog-pct">${pct.toFixed(0)}%</span>`);
+  if (p.step) bits.push(esc(`шаг ${p.step}`));
+  if (p.eta_seconds != null) bits.push(`осталось ${fmtDuration(p.eta_seconds)}`);
+  else if (p.stage) bits.push(esc(p.stage));
+  if (pct == null && !p.stage) bits.push("подготовка…");
+
+  return `${bar}<small class="prog-meta" title="${esc(p.stage || "")}">${bits.join(" · ")}</small>`;
+}
+
+// Per-job generation time → "42с" / "1м 05с" / "2ч 05м".
 function fmtDuration(sec) {
   if (sec == null || isNaN(sec)) return "";
   const s = Math.round(sec);
   if (s < 60) return `${s}с`;
   const m = Math.floor(s / 60);
-  return `${m}м ${String(s % 60).padStart(2, "0")}с`;
+  if (m < 60) return `${m}м ${String(s % 60).padStart(2, "0")}с`;
+  const h = Math.floor(m / 60);
+  return `${h}ч ${String(m % 60).padStart(2, "0")}м`;
+}
+
+// ---- batch timer + ETA --------------------------------------------------
+// Считает сервер (он знает длительности всех джоб); фронт лишь опрашивает и
+// между опросами сам тикает секундами, чтобы цифры не «замерзали».
+let batchTimer = null;
+let batchEta = null;
+let batchEtaAt = 0;
+let batchFinished = false;
+
+function startBatchTimer(runId) {
+  if (batchTimer) clearInterval(batchTimer);
+  let tick = 0;
+  const step = async () => {
+    tick++;
+    if (tick % 5 === 1) {            // раз в 5 с ходим на сервер
+      try {
+        const s = await fetch(`/api/runs/${runId}/status`,
+                              { headers: authHeaders() }).then(r => r.json());
+        batchEta = s.eta || null;
+        batchEtaAt = Date.now();
+        batchFinished = !!s.finished_at;
+      } catch (e) { /* сеть моргнула — покажем прошлые цифры */ }
+    }
+    renderBatchInfo();
+  };
+  batchTimer = setInterval(step, 1000);
+  step();
+}
+
+function renderBatchInfo() {
+  const box = $("#batch-info");
+  if (!batchEta) { box.innerHTML = ""; return; }
+  const drift = batchFinished ? 0 : Math.round((Date.now() - batchEtaAt) / 1000);
+
+  const elapsed = batchEta.elapsed_seconds != null
+    ? batchEta.elapsed_seconds + drift : null;
+  const left = batchEta.remaining_seconds != null
+    ? Math.max(0, batchEta.remaining_seconds - drift) : null;
+
+  const parts = [];
+  if (elapsed != null) parts.push(`прошло: <b>${fmtDuration(elapsed)}</b>`);
+  if (!batchFinished) {
+    parts.push(left != null
+      ? `осталось: <b class="eta-strong">${fmtDuration(left)}</b>`
+      : `осталось: <b>—</b>`);
+    if (left != null) {
+      const done = new Date(Date.now() + left * 1000);
+      parts.push(`финиш ≈ <b>${String(done.getHours()).padStart(2, "0")}:${String(done.getMinutes()).padStart(2, "0")}</b>`);
+    }
+  }
+  if (batchEta.per_job_seconds != null) {
+    parts.push(`на видео: <b>${fmtDuration(batchEta.per_job_seconds)}</b>`);
+  }
+  box.innerHTML = parts.join("<span>·</span>");
 }
 
 function updateCounts(c = {}, total = 0) {

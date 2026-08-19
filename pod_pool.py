@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -173,7 +174,12 @@ class PodPool:
         log.info("[%s] submit job %d wf=%s girl=%s lora=%s",
                  client.cfg.name, item.idx, job.workflow, job.girl, job.lora_name)
         prompt_id = await client.submit(wf)
-        entry = await client.wait(prompt_id, should_cancel=self.cancelled_check)
+        # 0 (по умолчанию) = ждать до конца: на свопящем поде даже картинка
+        # уходит за прежние 600 c, и таймаут убивал живую генерацию. Настоящие
+        # поломки ловит сам wait() — недостижимый ComfyUI и пропавшую задачу.
+        image_timeout = float(os.environ.get("IMAGE_WAIT_TIMEOUT_S", "0"))
+        entry = await client.wait(prompt_id, timeout=image_timeout,
+                                  should_cancel=self.cancelled_check)
 
         out_dir = output_dir(self.outputs_dir, job, self.day_tag, self.run_tag)
         out_dir.mkdir(parents=True, exist_ok=True)

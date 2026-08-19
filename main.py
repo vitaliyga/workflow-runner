@@ -17,6 +17,7 @@ State is kept on disk under `storage/`:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import csv
 import io
 import json
@@ -369,7 +370,72 @@ class RunState:
                                if self.run_id in RUN_QUEUE else None),
             "counts": counts,
             "total": len(self.jobs),
+            "eta": self.eta(counts),
             "jobs": self.jobs,
+        }
+
+    def eta(self, counts: dict[str, int]) -> dict[str, Any]:
+        """Сколько ещё считать весь пакет — по факту, а не по номиналу.
+
+        Одна и та же джоба на быстром и на свопящем поде отличается в десятки
+        раз, поэтому «сколько осталось» считается от наблюдённого темпа этого
+        прогона, а не от каких-либо констант:
+
+        * `per_job` — средняя длительность уже готовых джоб; пока готовых нет,
+          она экстраполируется из процента текущей (5 % за минуту → ~20 мин);
+        * текущая джоба даёт свой остаток из шагов сэмплера (`progress.eta_seconds`),
+          что на медленном поде честнее среднего;
+        * ожидающие джобы считаются по `per_job`.
+
+        Любое поле = None, когда данных ещё не хватает: UI показывает «—»
+        вместо выдуманного числа.
+        """
+        now = time.time()
+        done = [j for j in self.jobs
+                if j.get("status") == "done" and j.get("duration")]
+        per_job: float | None = None
+        if done:
+            per_job = sum(float(j["duration"]) for j in done) / len(done)
+
+        active = [j for j in self.jobs if j.get("status") in ("running", "stalled")]
+        # Нет ни одной готовой — оцениваем по прогрессу текущей.
+        if per_job is None:
+            for j in active:
+                pct = ((j.get("progress") or {}).get("percent") or 0)
+                started = j.get("started_ts")
+                if pct > 0 and started:
+                    elapsed = now - float(started)
+                    if elapsed > 0:
+                        per_job = elapsed / (pct / 100.0)
+                        break
+
+        remaining: float | None = 0.0
+        for j in active:
+            job_eta = (j.get("progress") or {}).get("eta_seconds")
+            if job_eta is None and per_job is not None:
+                started = j.get("started_ts")
+                spent = (now - float(started)) if started else 0.0
+                job_eta = max(0.0, per_job - spent)
+            if job_eta is None:
+                remaining = None
+                break
+            remaining += float(job_eta)
+        if remaining is not None:
+            pending = counts.get("pending", 0)
+            if pending:
+                if per_job is None:
+                    remaining = None
+                else:
+                    remaining += pending * per_job
+
+        return {
+            "per_job_seconds": round(per_job, 1) if per_job is not None else None,
+            "remaining_seconds": round(remaining) if remaining is not None else None,
+            "finish_ts": (now + remaining) if remaining is not None else None,
+            "elapsed_seconds": (round((self.finished_at or now) - self.started_at)
+                                if self.started_at else None),
+            "done_seconds": (round(sum(float(j["duration"]) for j in done))
+                             if done else 0),
         }
 
     async def emit(self, kind: str, **extra: Any) -> None:
@@ -1096,11 +1162,12 @@ def _stamp_job_timing(job: dict[str, Any], status: str, now: float,
 
     Тонкость: в 'running' джоба входит и как новая попытка (retry — время старта
     надо перезаписать), и как возврат из 'stalled', когда ComfyUI снова начал
-    отвечать. Во втором случае перезапись `started_ts` украла бы уже отработанное
-    время из `duration`, поэтому переход именно `stalled -> running` времени не
-    трогает; все остальные входы в 'running' штампуются как раньше."""
+    отвечать, и как обновление уже идущей джобы. В последних двух случаях
+    перезапись `started_ts` украла бы уже отработанное время из `duration`,
+    поэтому переходы `stalled -> running` и `running -> running` времени не
+    трогают; все остальные входы в 'running' штампуются как раньше."""
     if status == "running":
-        if prev_status != "stalled":
+        if prev_status not in ("stalled", "running"):
             job["started_ts"] = now
     elif status in ("done", "failed"):
         start = job.get("started_ts")
@@ -1274,34 +1341,10 @@ def _validate_run(state: RunState) -> None:
     if not pods:
         raise HTTPException(400, "no pods configured (see /settings)")
     registered = (cfg.get("workflows") or {}).get("workflows") or {}
-    # Пустой ключ бывает только при заполненной не для всех строк колонке
-    # workflow (лоадеры подставляют дефолт лишь когда колонки нет вовсе).
-    # Такая строка молча уехала бы на дефолтный/legacy граф и сломалась в
-    # середине рана — роняем сразу с номерами строк.
-    empty_rows = [str(j["idx"]) for j in state.jobs
-                  if not (j.get("workflow") or "").strip()]
-    if empty_rows:
-        raise HTTPException(
-            400, "пустая ячейка workflow в строках CSV: "
-            + ", ".join(empty_rows[:20]) + " — заполни ключ флоу.")
     unknown = sorted({j.get("workflow") for j in state.jobs
                       if j.get("workflow") and j["workflow"] not in registered})
     if unknown:
         raise HTTPException(400, f"workflow(s) not registered: {', '.join(unknown)}")
-    # Зарегистрированный ключ ещё не значит, что JSON-шаблон лежит на диске
-    # (в конфиг его дописывают руками, файл заливают отдельно). Без этой
-    # проверки фото-ран падает при билде, а видео-ран молча уезжает на
-    # legacy-шаблон и ломается в середине генерации.
-    broken = []
-    for key in sorted({j["workflow"] for j in state.jobs if j.get("workflow")}):
-        spec = registered[key]
-        tmpl = spec.get("template")
-        if not tmpl or not _resolve_workflow_template_path(str(tmpl)).exists():
-            broken.append(f"{key} → {tmpl or '(template не задан)'}")
-    if broken:
-        raise HTTPException(
-            400, "у флоу нет JSON-файла шаблона на раннере: "
-            + "; ".join(broken) + ". Загрузите файл в Настройках.")
     # Проверки адреса пода здесь нет намеренно: раннер не решает за пользователя,
     # какой URL правильный (proxy-адрес законен, например для ComfyUI на другой
     # машине). Недостижимый ComfyUI ловится уже во время ожидания результата —
@@ -1685,13 +1728,8 @@ def _resolve_video_flows(cfg: dict[str, Any], jobs: list[VideoJob]) -> dict[str,
                 template = json.loads(tmpl_path.read_text())
                 mapping = spec.get("video_fields") or default_video_mapping(template)
                 flows[key] = (template, mapping)
-            else:
-                # Зарегистрирован, но JSON пропал с диска. Раньше тут молча
-                # подставлялся legacy-шаблон — генерация шла не тем графом и
-                # ломалась в середине рана. Теперь это ошибка запуска.
-                unresolved.append(f"{key} (нет файла {spec['template']})")
-            continue
-        # fallback to legacy template — только для незарегистрированных ключей
+                continue
+        # fallback to legacy template
         if VIDEO_WORKFLOW_TEMPLATE_PATH.exists():
             template = load_video_template(VIDEO_WORKFLOW_TEMPLATE_PATH)
             flows[key] = (template, default_video_mapping(template))
@@ -1700,21 +1738,21 @@ def _resolve_video_flows(cfg: dict[str, Any], jobs: list[VideoJob]) -> dict[str,
     if unresolved:
         raise HTTPException(
             400,
-            "видео-флоу из CSV-колонки workflow недоступны: "
+            "не зарегистрированы видео-флоу для CSV-колонки workflow: "
             + ", ".join(sorted(unresolved))
-            + ". Загрузите JSON и зарегистрируйте их в Settings.",
+            + ". Загрузите и зарегистрируйте их в Settings.",
         )
     return flows
 
 
 def _missing_video_flows(cfg: dict[str, Any], jobs: list[VideoJob]) -> list[str]:
-    """Workflow keys from the CSV that can't run: empty cell, not registered,
-    or the registered template JSON is gone from disk (matches _validate_run)."""
+    """Workflow keys from the CSV that can't run: not registered, or the
+    registered template JSON is gone from disk. Empty key is the legacy
+    single-template path and isn't flagged (matches _validate_run)."""
     registered = (cfg.get("workflows") or {}).get("workflows") or {}
     missing: set[str] = set()
     for key in {(j.workflow or "").strip() for j in jobs}:
         if not key:
-            missing.add("(пустая ячейка workflow — заполни ключ флоу)")
             continue
         spec = registered.get(key)
         if not spec:
@@ -1973,9 +2011,12 @@ async def _video_handle(
     log.info("[%s] submit video job %d girl=%s seed=%d",
              client.cfg.name, idx, job.girl, job.seed)
     prompt_id = await client.submit(wf)
-    # Video generation (esp. long clips / 22B models) easily exceeds the 600s
-    # image default → раннер ложно помечал failed. 30 min, env-tunable.
-    wait_timeout = float(os.environ.get("VIDEO_WAIT_TIMEOUT_S", "1800"))
+    # Ждём столько, сколько нужно. Раньше стоял глухой лимит 30 мин, и на
+    # свопящем поде (380 c/шаг вместо 8) он убивал генерацию, которая всё ещё
+    # шла нормально. Теперь 0 = без лимита: живость ComfyUI и «не пропала ли
+    # задача» проверяет сам PodClient.wait, а не будильник. Переменная
+    # VIDEO_WAIT_TIMEOUT_S по-прежнему позволяет вернуть жёсткий лимит.
+    wait_timeout = float(os.environ.get("VIDEO_WAIT_TIMEOUT_S", "0"))
     # Наблюдаемость ожидания: пока ComfyUI считает, джоба стоит в `running` и
     # снаружи это неотличимо от «повисло». Раз в UNREACHABLE_LOG_EVERY опросов
     # пишем, сколько ждём, и помечаем джобу `stalled`, если ComfyUI отвалился —
@@ -2004,9 +2045,29 @@ async def _video_handle(
                 log.info("[%s] video job %d: жду результат, %d мин",
                          client.cfg.name, idx, secs // 60)
 
-    entry = await client.wait(prompt_id, timeout=wait_timeout,
-                              should_cancel=lambda: state.cancelled,
-                              on_poll=_on_poll)
+    # Живой прогресс: без него «running» два часа выглядит как «повисло».
+    # Названия нод берём из шаблона, чтобы в UI была стадия («KSampler»,
+    # «Декодировать VAE»), а не голый номер ноды.
+    node_titles = {
+        nid: str((n.get("_meta") or {}).get("title") or n.get("class_type") or nid)
+        for nid, n in template.items() if isinstance(n, dict)
+    }
+    tracker = _JobProgress(len(node_titles))
+
+    def _on_progress(info: dict[str, Any]) -> None:
+        payload = tracker.update(info, node_titles)
+        if payload is not None:
+            asyncio.create_task(_video_set_progress(state, idx, payload))
+
+    watcher = asyncio.create_task(client.watch_progress(prompt_id, _on_progress))
+    try:
+        entry = await client.wait(prompt_id, timeout=wait_timeout,
+                                  should_cancel=lambda: state.cancelled,
+                                  on_poll=_on_poll)
+    finally:
+        watcher.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await watcher
 
     # Download all outputs (video files). Top-level folder = run date (DD-MM),
     # then the previous per-job layout. This propagates everywhere rel paths
@@ -2069,6 +2130,104 @@ async def _video_handle(
                             pod=client.cfg.name, error=None)
 
 
+class _JobProgress:
+    """Сводит websocket-тики ComfyUI в один прогресс одной джобы.
+
+    Отсюда берутся и процент, и per-job ETA. ETA считается по темпу шагов
+    сэмплера, а не по номинальному времени: на свопящем поде шаг идёт 380 c
+    вместо 8, и только замер на месте даёт правдивую оценку. Темп сглаживается
+    (EMA), иначе первый шаг — вместе с загрузкой моделей в VRAM — растянул бы
+    прогноз в разы.
+
+    `update()` возвращает payload для UI или None, если показывать нечего нового
+    (тик без изменений или чаще, чем `min_interval` — status.json пишется на
+    каждый emit, и молотить им по диску незачем).
+    """
+
+    def __init__(self, total_nodes: int, min_interval: float = 2.0,
+                 smoothing: float = 0.6):
+        self.total_nodes = total_nodes
+        self.min_interval = min_interval
+        self.smoothing = smoothing
+        self.percent: float | None = None
+        self.value: float | None = None
+        self.maximum: float | None = None
+        self.node: str = ""
+        self.nodes_done: int | None = None
+        self.sec_per_step: float | None = None
+        self._step_ts: float | None = None
+        self._emitted_at: float = 0.0
+        self._emitted_key: tuple | None = None
+
+    def update(self, info: dict[str, Any],
+               node_titles: dict[str, str]) -> dict[str, Any] | None:
+        now = time.time()
+        value, maximum = info.get("value"), info.get("max")
+
+        if value is not None and maximum:
+            value, maximum = float(value), float(maximum)
+            if self.value is not None and value > self.value and self._step_ts:
+                per = (now - self._step_ts) / (value - self.value)
+                self.sec_per_step = (per if self.sec_per_step is None else
+                                     self.sec_per_step * self.smoothing
+                                     + per * (1 - self.smoothing))
+            if value != self.value:
+                self._step_ts = now
+            self.value, self.maximum = value, maximum
+            self.percent = max(0.0, min(100.0, value / maximum * 100.0))
+
+        if info.get("node"):
+            self.node = str(info["node"])
+        if info.get("nodes_done") is not None:
+            self.nodes_done = int(info["nodes_done"])
+
+        eta = None
+        if (self.sec_per_step is not None and self.value is not None
+                and self.maximum is not None):
+            eta = max(0.0, (self.maximum - self.value) * self.sec_per_step)
+
+        payload = {
+            "percent": round(self.percent, 1) if self.percent is not None else None,
+            "step": (f"{self.value:g}/{self.maximum:g}"
+                     if self.value is not None and self.maximum else None),
+            "stage": node_titles.get(self.node, self.node) or None,
+            "nodes_done": self.nodes_done,
+            "nodes_total": self.total_nodes or None,
+            "sec_per_step": (round(self.sec_per_step, 1)
+                             if self.sec_per_step is not None else None),
+            "eta_seconds": round(eta) if eta is not None else None,
+            "updated_at": now,
+        }
+        key = (payload["percent"], payload["step"], payload["stage"],
+               payload["nodes_done"])
+        if key == self._emitted_key and now - self._emitted_at < 30:
+            return None                       # то же самое — не спамим
+        if now - self._emitted_at < self.min_interval and key != self._emitted_key:
+            # Значение изменилось, но слишком часто: подождём следующего тика,
+            # кроме финального 100 % — его показать надо сразу.
+            if payload["percent"] != 100.0:
+                return None
+        self._emitted_at = now
+        self._emitted_key = key
+        return payload
+
+
+async def _video_set_progress(state: RunState, idx: int,
+                              payload: dict[str, Any]) -> None:
+    """Кладёт прогресс в джобу и рассылает событие.
+
+    Отдельно от `_video_set_status`, и намеренно: тот на каждый вызов со
+    status='running' переставляет метки времени, а прогресс тикает десятки раз
+    за джобу — статус и тайминги трогать нельзя.
+    """
+    for j in state.jobs:
+        if j["idx"] == idx:
+            j["progress"] = payload
+            j["updated_at"] = payload["updated_at"]
+            await state.emit("job_updated", job=j)
+            return
+
+
 async def _video_set_status(state: RunState, idx: int, status: str, **extra: Any) -> None:
     for j in state.jobs:
         if j["idx"] == idx:
@@ -2077,6 +2236,13 @@ async def _video_set_status(state: RunState, idx: int, status: str, **extra: Any
             j["status"] = status
             j["updated_at"] = now
             _stamp_job_timing(j, status, now, prev_status)
+            # Прогресс живёт ровно одну попытку: на новой попытке он не должен
+            # начинаться с чужих 80 %, а на готовой джобе — застывать на 75 %
+            # (и, что важнее, кормить пакетный ETA мёртвым eta_seconds).
+            if status == "done":
+                j["progress"] = {"percent": 100.0, "updated_at": now}
+            elif prev_status not in ("running", "stalled") or status == "failed":
+                j.pop("progress", None)
             for k, v in extra.items():
                 j[k] = v
             await state.emit("job_updated", job=j)
