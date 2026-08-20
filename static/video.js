@@ -45,9 +45,23 @@ wireDrop($("#csv-drop"), $("#csv-input"), (files) => {
 });
 
 wireDrop($("#photos-drop"), $("#photos-input"), (files) => {
-  photoFiles = Array.from(files);
-  $("#photos-name").textContent =
-    photoFiles.length ? `${photoFiles.length} файл(ов)` : "";
+  // НАКАПЛИВАЕМ, а не заменяем: десяток видео обычно тащат в несколько приёмов,
+  // и прежнее поведение оставляло только последнюю партию — остальные файлы
+  // молча терялись, а прогон падал на "не загружены файлы: N шт".
+  // Дубли по имени отбрасываем, чтобы повторное перетаскивание не удваивало.
+  const seen = new Set(photoFiles.map((f) => f.name));
+  let added = 0;
+  for (const f of Array.from(files)) {
+    if (seen.has(f.name)) continue;
+    seen.add(f.name);
+    photoFiles.push(f);
+    added++;
+  }
+  const mb = photoFiles.reduce((s, f) => s + (f.size || 0), 0) / 1048576;
+  $("#photos-name").textContent = photoFiles.length
+    ? `${photoFiles.length} файл(ов), ${mb.toFixed(1)} МБ` +
+      (added < files.length ? ` (дубли пропущены: ${files.length - added})` : "")
+    : "";
 });
 
 function refreshCreateBtn() {
@@ -58,23 +72,53 @@ function refreshCreateBtn() {
 // Upload photos to an existing run in small batches (one giant multipart gets
 // dropped by the RunPod proxy). Returns latest missing_inputs.
 async function uploadPhotosInBatches(runId, files, onProgress) {
-  const MAX_FILES = 20, MAX_BYTES = 25 * 1024 * 1024;
-  let i = 0, done = 0, missing = [];
+  // Пачка ограничена 8 МБ: прокси RunPod рубит крупные multipart-запросы (403),
+  // а видео весят по 5-8 МБ — значит каждое уедет своим запросом, тогда как
+  // мелкие фото по-прежнему летят десятками за раз. Файл больше лимита
+  // отправляется один, но отправляется.
+  const MAX_FILES = 20, MAX_BYTES = 8 * 1024 * 1024;
+  const batches = [];
+  let i = 0;
   while (i < files.length) {
-    const fd = new FormData();
-    let n = 0, bytes = 0;
-    while (i < files.length && n < MAX_FILES && bytes < MAX_BYTES) {
-      const f = files[i++];
-      fd.append("photos", f, f.name);
-      n++; bytes += f.size || 0;
+    const batch = [];
+    let bytes = 0;
+    while (i < files.length && batch.length < MAX_FILES) {
+      const f = files[i];
+      if (batch.length && bytes + (f.size || 0) > MAX_BYTES) break;
+      batch.push(f); bytes += f.size || 0; i++;
     }
+    batches.push(batch);
+  }
+
+  const post = async (batch) => {
+    const fd = new FormData();
+    batch.forEach((f) => fd.append("photos", f, f.name));
     const r = await fetch(`/api/runs/${runId}/inputs`,
                           { method: "POST", body: fd, headers: authHeaders() });
-    if (!r.ok) throw new Error(await r.text());
-    const data = await r.json().catch(() => ({}));
-    if (Array.isArray(data.missing_inputs)) missing = data.missing_inputs;
-    done += n;
+    if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
+    return r.json().catch(() => ({}));
+  };
+
+  let done = 0, missing = [];
+  const failed = [];
+  for (const batch of batches) {
+    let data = null;
+    // Одна повторная попытка: обрыв на прокси — обычное дело, и терять из-за
+    // него всю загрузку (прежнее поведение — throw наружу) незачем.
+    for (let attempt = 1; attempt <= 2 && !data; attempt++) {
+      try {
+        data = await post(batch);
+      } catch (e) {
+        if (attempt === 2) failed.push(...batch.map((f) => f.name));
+        else await new Promise((res) => setTimeout(res, 1500));
+      }
+    }
+    if (data && Array.isArray(data.missing_inputs)) missing = data.missing_inputs;
+    done += batch.length;
     if (onProgress) onProgress(done, files.length);
+  }
+  if (failed.length) {
+    throw new Error(`не удалось загрузить (${failed.length}): ${failed.join(", ")}`);
   }
   return missing;
 }
@@ -111,30 +155,36 @@ $("#btn-create").addEventListener("click", async () => {
   if (photoFiles.length) {
     try {
       missing_inputs = await uploadPhotosInBatches(run_id, photoFiles,
-        (d, t) => { $("#create-msg").textContent = `загрузка фото ${d}/${t}…`; });
+        (d, t) => { $("#create-msg").textContent = `загрузка файлов ${d}/${t}…`; });
     } catch (e) {
       $("#create-msg").textContent = "";
       $("#btn-create").disabled = false;
       await openRun(run_id, total);
       showHint("error",
-        `Загрузка фото оборвалась: ${e}. Часть могла не дойти — повтори (можно частями).`);
+        `Загрузка оборвалась: ${e}. Перетащи недостающие файлы ещё раз — ` +
+        `выбор теперь накапливается, и пересоздай прогон.`);
       return;
     }
   }
   $("#create-msg").textContent = "";
   await openRun(run_id, total);
 
+  // Показываем ИМЕНА недостающих файлов: "4 шт" не давало понять, что именно
+  // перетащить, а имена сразу видно в проводнике. Файлы бывают и видео, поэтому
+  // формулировка нейтральная — "файлы", а не "фото".
+  const missingList = (missing_inputs || []).slice(0, 12).join(", ") +
+    ((missing_inputs || []).length > 12 ? ` и ещё ${missing_inputs.length - 12}` : "");
   if (missing_flows && missing_flows.length) {
-    const photosNote = (missing_inputs && missing_inputs.length)
-      ? ` Плюс не загружены фото: ${missing_inputs.length} шт.` : "";
+    const filesNote = (missing_inputs && missing_inputs.length)
+      ? ` Плюс не загружены файлы (${missing_inputs.length}): ${missingList}.` : "";
     showHint("error",
       `⛔ В CSV есть флоу, которых нет на раннере: ${missing_flows.join("; ")}. ` +
       `Догрузи JSON и зарегистрируй в Настройках, потом пересоздай прогон.` +
-      photosNote);
+      filesNote);
   } else if (missing_inputs && missing_inputs.length) {
     showHint("warn",
-      `⚠ Не загружены фото: ${missing_inputs.length} шт. ` +
-      `Без них запуск упадёт. Дозагрузи и пересоздай прогон.`);
+      `⚠ Не загружены файлы (${missing_inputs.length}): ${missingList}. ` +
+      `Перетащи их в дропзону (выбор накапливается) и пересоздай прогон.`);
   } else {
     showHint("info",
       `✓ Видео прогон создан, ${total} заданий готово. Нажми «▶ Запустить генерацию».`);
