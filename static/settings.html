@@ -54,6 +54,21 @@
   </section>
 
   <section class="card">
+    <h2>Память (RAM-чистка ComfyUI)</h2>
+    <p class="muted">Каждые N завершённых джоб раннер дёргает ComfyUI
+       <code>POST /free</code> — сбрасывает кэши, чтобы длинные батчи
+       (сотни генераций) не выжирали ОЗУ пода до OOM.</p>
+    <div class="field">
+      <label>Чистить каждые N джоб (0 = выключено)</label>
+      <input id="mem-free-every" type="number" min="0" step="1" />
+    </div>
+    <label class="muted" style="display:block; margin-top:4px;">
+      <input type="checkbox" id="mem-unload" />
+      выгружать и модели (чистит сильнее, но после чистки модели грузятся заново — джоба чуть дольше)
+    </label>
+  </section>
+
+  <section class="card">
     <h2>Workflow JSON-файлы</h2>
     <p class="muted">Файлы лежат в <code>jobs/</code>. В <b>«Workflows mapping»</b>
        ниже каждый ключ должен ссылаться на одно из этих имён.</p>
@@ -106,6 +121,8 @@ async function load() {
   $("#s3-prefix").value   = config.s3?.prefix || "";
   $("#s3-region").value   = config.s3?.region || "";
   $("#s3-endpoint").value = config.s3?.endpoint_url || "";
+  $("#mem-free-every").value = config.memory?.free_every ?? 10;
+  $("#mem-unload").checked = config.memory?.unload_models ?? true;
   // Workflows block as YAML text from the server (no browser-side YAML lib).
   try {
     const { yaml } = await fetch("/api/config/workflows_yaml",
@@ -170,6 +187,10 @@ $("#save").onclick = async () => {
     prefix: $("#s3-prefix").value,
     region: $("#s3-region").value,
     endpoint_url: $("#s3-endpoint").value,
+  };
+  config.memory = {
+    free_every: Math.max(0, parseInt($("#mem-free-every").value) || 0),
+    unload_models: $("#mem-unload").checked,
   };
   // Server parses workflows YAML; we pass it as a string field.
   const payload = { ...config, workflows_yaml: $("#workflows-yaml").value };

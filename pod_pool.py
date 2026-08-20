@@ -64,6 +64,11 @@ class PodPool:
         self.queue: asyncio.Queue[JobItem | None] = asyncio.Queue()
         # cache of (pod_name, image_path) -> remote filename to skip re-upload
         self._upload_cache: dict[tuple[str, str], str] = {}
+        # RAM-чистка: каждые free_every завершённых джоб дёргаем ComfyUI
+        # POST /free (0 = выключено). Настраивается блоком memory: в конфиге.
+        self.free_every: int = 0
+        self.free_unload_models: bool = True
+        self._jobs_done = 0
 
     @staticmethod
     def _job_images(job: Job) -> tuple[str, ...]:
@@ -114,6 +119,11 @@ class PodPool:
                     await self._handle_dry(name, item)
                 else:
                     await self._handle(client, item)
+                    self._jobs_done += 1
+                    if self.free_every and self._jobs_done % self.free_every == 0:
+                        log.info("[%s#%d] RAM cleanup: ComfyUI /free after %d jobs",
+                                 name, slot, self._jobs_done)
+                        await client.free(self.free_unload_models)
             except Exception as e:
                 item.attempts += 1
                 log.warning("[%s#%d] job %d failed (attempt %d): %s",

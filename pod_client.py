@@ -87,6 +87,17 @@ class PodClient:
         except Exception:
             pass
 
+    async def free(self, unload_models: bool = True) -> None:
+        """Ask ComfyUI to drop its caches (and optionally unload models) —
+        the /free endpoint. Best-effort: чистка памяти не должна ронять ран."""
+        payload = {"free_memory": True, "unload_models": bool(unload_models)}
+        try:
+            async with self.session.post(f"{self.cfg.url}/free",
+                                         json=payload, headers=self._headers) as r:
+                await r.read()
+        except Exception:
+            pass
+
     async def queue_ids(self) -> set[str] | None:
         """prompt_id'ы, которые ComfyUI сейчас считает или держит в очереди.
 

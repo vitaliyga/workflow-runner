@@ -1360,6 +1360,18 @@ def _any_run_active(exclude: str | None = None) -> bool:
     return False
 
 
+def _memory_cfg(cfg: dict[str, Any]) -> tuple[int, bool]:
+    """Настройки RAM-чистки (Settings → Память): каждые N завершённых джоб
+    раннер дёргает ComfyUI POST /free, чтобы сотни генераций подряд не
+    выжирали ОЗУ до OOM. 0 = выключено."""
+    mem = cfg.get("memory") or {}
+    try:
+        free_every = max(0, int(mem.get("free_every", 10)))
+    except (TypeError, ValueError):
+        free_every = 10
+    return free_every, bool(mem.get("unload_models", True))
+
+
 async def _execute_image_run(state: RunState) -> None:
     cfg = load_config()
     pod_cfgs = [
@@ -1391,6 +1403,7 @@ async def _execute_image_run(state: RunState) -> None:
         day_tag=_run_day_tag(state.run_id), run_tag=_run_time_tag(state.run_id),
         save_prompt=state.save_prompt, s3=s3,
     )
+    pool.free_every, pool.free_unload_models = _memory_cfg(cfg)
     csv_jobs = load_jobs(state.dir / "jobs.csv")
     await _run_pool(state, pool, csv_jobs)
 
@@ -1411,7 +1424,9 @@ async def _execute_video_run(state: RunState) -> None:
     state.finished_at = None
     state.cancelled = False
     await state.emit("run_started")
-    await _run_video_pool(state, pod_cfgs, video_jobs, flows, s3)
+    free_every, free_unload = _memory_cfg(cfg)
+    await _run_video_pool(state, pod_cfgs, video_jobs, flows, s3,
+                          free_every=free_every, free_unload=free_unload)
 
 
 async def _execute_run(state: RunState) -> None:
@@ -1846,6 +1861,8 @@ async def _run_video_pool(
     jobs: list[VideoJob],
     flows: dict[str, tuple[dict, dict]],
     s3: Any,
+    free_every: int = 0,
+    free_unload: bool = True,
 ) -> None:
     """Execute video jobs, each patched via its registered flow mapping."""
     import aiohttp
@@ -1855,6 +1872,7 @@ async def _run_video_pool(
     for i, j in enumerate(jobs):
         await queue.put((i, j))
 
+    done_counter = {"n": 0}   # общий на всех воркеров счётчик для RAM-чистки
     timeout = aiohttp.ClientTimeout(total=None, sock_read=600)
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -1863,7 +1881,10 @@ async def _run_video_pool(
                 client = PodClient(pod_cfg, session)
                 for slot in range(pod_cfg.max_parallel):
                     workers.append(asyncio.create_task(
-                        _video_worker(state, client, queue, flows, s3),
+                        _video_worker(state, client, queue, flows, s3,
+                                      free_every=free_every,
+                                      free_unload=free_unload,
+                                      done_counter=done_counter),
                         name=f"{pod_cfg.name}#{slot}",
                     ))
             # poison pills
@@ -1885,6 +1906,9 @@ async def _video_worker(
     flows: dict[str, tuple[dict, dict]],
     s3: Any,
     max_attempts: int = 3,
+    free_every: int = 0,
+    free_unload: bool = True,
+    done_counter: dict[str, int] | None = None,
 ) -> None:
     from pod_client import PodError
 
@@ -1902,6 +1926,12 @@ async def _video_worker(
         while attempts < max_attempts:
             try:
                 await _video_handle(state, client, idx, job, flows, s3)
+                if free_every and done_counter is not None:
+                    done_counter["n"] += 1
+                    if done_counter["n"] % free_every == 0:
+                        log.info("[%s] RAM cleanup: ComfyUI /free after %d jobs",
+                                 client.cfg.name, done_counter["n"])
+                        await client.free(free_unload)
                 break
             except Exception as e:
                 attempts += 1
