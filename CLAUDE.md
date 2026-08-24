@@ -144,3 +144,43 @@ side-by-side с оригиналом (нода 164) — `filename_prefix` про
 Длительность живёт на `Float (Duration)` (секунды), кадры считает
 `ComfyMathExpression`; ширина/высота — на самой ноде `MiniMax H3 Reference to
 Video`.
+
+### MiniMax H3 + авто-описание по рефам (`minimax_h3_qwenvl`, `minimax_h3_grok`)
+
+Два флоу-близнеца в `jobs/`: промпт для генерации **не пишется руками**, а
+собирается анализатором из реф-фото и реф-видео. Отличаются только анализатором:
+
+| ключ | анализатор | что нужно |
+|---|---|---|
+| `minimax_h3_qwenvl` | `AILab_QwenVL_Advanced` ×2, модель `Qwen3-VL-8B-Instruct-FP8` | локально, ключей не надо |
+| `minimax_h3_grok` | `GrokImageAnalyzer` + `GrokVideoAnalyzer` + `GrokConfig` | **API-ключ x.ai**; фото/видео уходят во внешний сервис |
+
+Общий стек нод: `MiniMaxH3ReferenceToVideo`, `SAM3_Detect` (+ `CheckpointLoaderSimple`
+на `sam3.1_multiplex_fp16`), `SolAttnPatch`, `Video Slice`, `ComfyMathExpression`,
+`StringFormat`, `LoadVideo`/`GetVideoComponents`, `CreateVideo`/`SaveVideo`,
+`ImageScaleToTotalPixels`. Ключ в `GrokConfig.api_key` **в git не хранится** —
+проставляй через `set_fields` в `storage/config.yaml` или руками на поде.
+
+Три `StringFormat` подписаны по роли (определено по связям, не по догадке):
+
+- **`Форматировать текст видео`** (920) — инструкция анализатору **видео**, на вход
+  берёт `Positive Prompt (action hint)`;
+- **`Форматировать текст фото`** (922) — инструкция анализатору **реф-фото**;
+- **`Форматировать текст итог (в MiniMax H3)`** (917) — склейка обоих описаний,
+  уходит в `MiniMaxH3ReferenceToVideo`.
+
+Заголовки остальных нод русские — и это нормально: детектор ловит их **по классу**
+(`LoadVideo`, `LoadImage`, `RandomNoise`, `BasicScheduler`, `LoraLoaderModelOnly`,
+`CheckpointLoaderSimple`). Английский нужен только ноде промпта — у неё класса-
+признака нет, поэтому 509 названа `Positive Prompt (action hint)`; слово `prompt`
+намеренно больше нигде не встречается, иначе спека `prompt_positive` заберёт
+`StringFormat`.
+
+Детект даёт 13 каталожных колонок: `prompt_positive`, `input_image`, `input_video`,
+`seed`, `video_length_seconds`, `steps`, `denoise`, `scheduler`, `sampler_name`,
+`lora_name`, `lora_strength`, `checkpoint_name`, `diffusion_model_name`.
+
+**Разрешение не задаётся через `video_width`/`video_height`** — эти входы у
+`MiniMax H3` заняты проводом от `GetImageSize`, и раннер их не перезаписывает
+(запись во вход-провод запрещена). Управляй через universal-колонку
+`Resolution (mp)` (нода 924) → `ImageScaleToTotalPixels`.

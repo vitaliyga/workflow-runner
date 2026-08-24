@@ -1,0 +1,658 @@
+{
+  "454": {
+    "inputs": {
+      "x": 0,
+      "y": 0,
+      "resize_source": true,
+      "destination": [
+        "456",
+        0
+      ],
+      "source": [
+        "912",
+        0
+      ],
+      "mask": [
+        "927",
+        0
+      ]
+    },
+    "class_type": "ImageCompositeMasked",
+    "_meta": {
+      "title": "Составное изображение с маской"
+    }
+  },
+  "456": {
+    "inputs": {
+      "upscale_method": "nearest-exact",
+      "megapixels": 0.5,
+      "resolution_steps": 1,
+      "image": [
+        "460",
+        0
+      ]
+    },
+    "class_type": "ImageScaleToTotalPixels",
+    "_meta": {
+      "title": "Масштабировать изображение до общего количества пикселей"
+    }
+  },
+  "459": {
+    "inputs": {
+      "file": "part_011+.mp4",
+      "video-preview": ""
+    },
+    "class_type": "LoadVideo",
+    "_meta": {
+      "title": "Загрузить видео"
+    }
+  },
+  "460": {
+    "inputs": {
+      "video": [
+        "483",
+        0
+      ]
+    },
+    "class_type": "GetVideoComponents",
+    "_meta": {
+      "title": "Извлечь компоненты видео"
+    }
+  },
+  "461": {
+    "inputs": {
+      "images": [
+        "454",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "Предварительный просмотр изображения"
+    }
+  },
+  "463": {
+    "inputs": {
+      "unet_name": "minimax_h3_ref2va_bf16.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "Загрузить модель диффузии"
+    }
+  },
+  "464": {
+    "inputs": {
+      "prompt": [
+        "917",
+        0
+      ],
+      "width": [
+        "925",
+        0
+      ],
+      "height": [
+        "925",
+        1
+      ],
+      "length": [
+        "481",
+        1
+      ],
+      "ref_image_size": "match",
+      "clip": [
+        "465",
+        0
+      ],
+      "vae": [
+        "470",
+        0
+      ],
+      "audio_vae": [
+        "474",
+        0
+      ],
+      "ref_images.ref_image_0": [
+        "496",
+        0
+      ],
+      "ref_videos.ref_video_0": [
+        "461",
+        0
+      ],
+      "ref_video_audios.ref_video_audio_0": [
+        "460",
+        1
+      ]
+    },
+    "class_type": "MiniMaxH3ReferenceToVideo",
+    "_meta": {
+      "title": "MiniMax H3 Reference to Video"
+    }
+  },
+  "465": {
+    "inputs": {
+      "clip_name": "qwen3vl_32b_minimax_h3_bf16.safetensors",
+      "type": "minimax",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "Загрузить CLIP"
+    }
+  },
+  "466": {
+    "inputs": {
+      "model": [
+        "503",
+        0
+      ],
+      "conditioning": [
+        "464",
+        0
+      ]
+    },
+    "class_type": "BasicGuider",
+    "_meta": {
+      "title": "Основной гид"
+    }
+  },
+  "467": {
+    "inputs": {
+      "noise_seed": 871454140207507
+    },
+    "class_type": "RandomNoise",
+    "_meta": {
+      "title": "Случайный шум"
+    }
+  },
+  "468": {
+    "inputs": {
+      "sampler_name": "res_multistep"
+    },
+    "class_type": "KSamplerSelect",
+    "_meta": {
+      "title": "Выбор KSampler"
+    }
+  },
+  "469": {
+    "inputs": {
+      "noise": [
+        "467",
+        0
+      ],
+      "guider": [
+        "466",
+        0
+      ],
+      "sampler": [
+        "468",
+        0
+      ],
+      "sigmas": [
+        "473",
+        0
+      ],
+      "latent_image": [
+        "464",
+        1
+      ]
+    },
+    "class_type": "SamplerCustomAdvanced",
+    "_meta": {
+      "title": "Пользовательский сэмплер (Расширенный)"
+    }
+  },
+  "470": {
+    "inputs": {
+      "vae_name": "minimax_h3_video_vae_fp16.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Загрузить VAE"
+    }
+  },
+  "471": {
+    "inputs": {
+      "samples": [
+        "469",
+        0
+      ],
+      "vae": [
+        "474",
+        0
+      ]
+    },
+    "class_type": "VAEDecodeAudio",
+    "_meta": {
+      "title": "Декодировать аудио VAE"
+    }
+  },
+  "472": {
+    "inputs": {
+      "samples": [
+        "469",
+        0
+      ],
+      "vae": [
+        "470",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "Декодировать VAE"
+    }
+  },
+  "473": {
+    "inputs": {
+      "scheduler": "simple",
+      "steps": 8,
+      "denoise": 1,
+      "model": [
+        "503",
+        0
+      ]
+    },
+    "class_type": "BasicScheduler",
+    "_meta": {
+      "title": "Основной scheduler"
+    }
+  },
+  "474": {
+    "inputs": {
+      "vae_name": "minimax_h3_audio_vae_fp32.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Загрузить VAE"
+    }
+  },
+  "475": {
+    "inputs": {
+      "fps": 24,
+      "bit_depth": 8,
+      "images": [
+        "472",
+        0
+      ],
+      "audio": [
+        "471",
+        0
+      ]
+    },
+    "class_type": "CreateVideo",
+    "_meta": {
+      "title": "Создать видео"
+    }
+  },
+  "476": {
+    "inputs": {
+      "fps": 24,
+      "bit_depth": 8,
+      "images": [
+        "472",
+        0
+      ],
+      "audio": [
+        "460",
+        1
+      ]
+    },
+    "class_type": "CreateVideo",
+    "_meta": {
+      "title": "Создать видео"
+    }
+  },
+  "480": {
+    "inputs": {
+      "value": 10
+    },
+    "class_type": "PrimitiveFloat",
+    "_meta": {
+      "title": "Float (Duration)"
+    }
+  },
+  "481": {
+    "inputs": {
+      "expression": "max(5, round(a * 24)) + (5 - (max(5, round(a * 24)) % 17)) % 17",
+      "values.a": [
+        "480",
+        0
+      ]
+    },
+    "class_type": "ComfyMathExpression",
+    "_meta": {
+      "title": "Математическое выражение"
+    }
+  },
+  "482": {
+    "inputs": {
+      "filename_prefix": "video/ComfyUI",
+      "format": "auto",
+      "codec": "auto",
+      "video": [
+        "476",
+        0
+      ]
+    },
+    "class_type": "SaveVideo",
+    "_meta": {
+      "title": "Сохранить видео"
+    }
+  },
+  "483": {
+    "inputs": {
+      "start_time": 0,
+      "duration": [
+        "480",
+        0
+      ],
+      "strict_duration": false,
+      "video": [
+        "459",
+        0
+      ]
+    },
+    "class_type": "Video Slice",
+    "_meta": {
+      "title": "Видеофрагмент"
+    }
+  },
+  "491": {
+    "inputs": {
+      "mask": [
+        "927",
+        0
+      ]
+    },
+    "class_type": "MaskToImage",
+    "_meta": {
+      "title": "Преобразовать маску в изображение"
+    }
+  },
+  "492": {
+    "inputs": {
+      "images": [
+        "491",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "Предварительный просмотр изображения"
+    }
+  },
+  "496": {
+    "inputs": {
+      "image": "00670_00018_.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Загрузить изображение"
+    }
+  },
+  "500": {
+    "inputs": {
+      "value": "This has been tested with this video:\n\nhttps://civitai.red/images/130681977\n\nAnd four different outfits:\n\n\n1. https://civitai.red/images/3341718\n2. https://civitai.red/images/139041957\n3. https://civitai.red/images/342380\n4. https://civitai.red/images/138717307"
+    },
+    "class_type": "PrimitiveStringMultiline",
+    "_meta": {
+      "title": "Строка (многострочная)"
+    }
+  },
+  "502": {
+    "inputs": {
+      "lora_name": "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
+      "strength_model": 1,
+      "model": [
+        "463",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "Turbo Lora"
+    }
+  },
+  "503": {
+    "inputs": {
+      "tau": 1,
+      "start_percent": 0.2,
+      "end_percent": 0.9,
+      "min_tokens": 4096,
+      "int8_qk": true,
+      "sink_conditioning": "exact_kv",
+      "morton": false,
+      "morton_curve": "2d_frame",
+      "int8_pv": true,
+      "verbose": false,
+      "use_tma": false,
+      "dense_blocks": "",
+      "model": [
+        "502",
+        0
+      ]
+    },
+    "class_type": "SolAttnPatch",
+    "_meta": {
+      "title": "Patch Sol-Attn"
+    }
+  },
+  "509": {
+    "inputs": {
+      "value": ""
+    },
+    "class_type": "PrimitiveStringMultiline",
+    "_meta": {
+      "title": "Positive Prompt (action hint)"
+    }
+  },
+  "912": {
+    "inputs": {
+      "image": [
+        "456",
+        0
+      ]
+    },
+    "class_type": "ImageInvert",
+    "_meta": {
+      "title": "Инвертировать изображение"
+    }
+  },
+  "916": {
+    "inputs": {
+      "model_name": "Qwen3-VL-8B-Instruct-FP8",
+      "quantization": "None (FP16)",
+      "attention_mode": "sage",
+      "use_torch_compile": false,
+      "device": "cuda:0",
+      "preset_prompt": "📹 Video Summary",
+      "custom_prompt": [
+        "922",
+        0
+      ],
+      "max_tokens": 1024,
+      "temperature": 0.1,
+      "top_p": 0.9,
+      "num_beams": 1,
+      "repetition_penalty": 1.2,
+      "frame_count": 1,
+      "keep_model_loaded": false,
+      "seed": 2,
+      "image": [
+        "496",
+        0
+      ]
+    },
+    "class_type": "AILab_QwenVL_Advanced",
+    "_meta": {
+      "title": "QwenVL (Advanced)"
+    }
+  },
+  "917": {
+    "inputs": {
+      "f_string": "subject_definitions:\n<Subject 1> is the woman in <Picture 1>.\n{a}\n\nretention_analysis:\n<Subject 1>: attribute_transfer - transfer the woman body, face, hair style, hair color\n<Video 1>: partially_preserved - preserve the background, preserve the action, the camera movements, preserve the woman, the exact camera angle, the room setup, and the room lighting\n\n{b}\n{a} \n",
+      "values.a": [
+        "916",
+        0
+      ],
+      "values.b": [
+        "921",
+        0
+      ]
+    },
+    "class_type": "StringFormat",
+    "_meta": {
+      "title": "Форматировать текст итог (в MiniMax H3)"
+    }
+  },
+  "918": {
+    "inputs": {
+      "source": [
+        "917",
+        0
+      ]
+    },
+    "class_type": "PreviewAny",
+    "_meta": {
+      "title": "Предпросмотр любого"
+    }
+  },
+  "920": {
+    "inputs": {
+      "f_string": "Analyze this video shot for reference-to-video generation. The frames are numbered and timestamped in chronological order - use the timestamps to reconstruct the motion precisely.\n\nRespond in exactly two sections, in this exact format (do not include the ``` markers in your answer):\n\n```\nsummary:\nScene description\n\ndetailed_description:\nAction description\n```\n\nFirst section (summary - scene only, 2-3 sentences):\n- environment and background: location type, key objects and their rough positions\n- camera framing (close-up / medium / wide), camera angle (eye-level / high / low), and camera movement (static / pan / tilt / tracking / handheld)\n- lighting: main light direction, day or night, bright or dim\n\nSecond section (detailed_description - actions only; this is the most important part, be exhaustive and precise):\n- Reconstruct the whole action as a chronological timeline. For each phase give its approximate time range from the frame timestamps, e.g. \"0.0-2.0s: ...\", \"2.0-4.5s: ...\". Cover the entire clip from the first to the last frame, do not skip phases.\n- For every movement state WHICH body part moves (head, shoulders, chest, waist, hips, arms, hands, legs), its DIRECTION (up/down, left/right, forward/backward, toward/away from the camera, clockwise/counter-clockwise), its AMPLITUDE (slight / moderate / large) and its SPEED (slow / medium / fast).\n- If a movement repeats or loops, say so explicitly and estimate how many repetitions.\n- State <Subject 1>'s position in the frame (left / center / right, near / far) and body orientation relative to the camera (facing the camera / profile / back to the camera / three-quarter), and how this orientation changes over time.\n- Describe posture at each phase: standing / sitting / kneeling / lying / leaning / bending, weight shifts, knee bends, back arch, head tilt.\n- Describe what the hands do at each phase: where they are, what they touch (own body, an object, the other person), and how they move.\n- Describe gaze direction (into the camera / away / down / at the other subject) and the moments when it changes.\n- Describe interactions with objects and with <Subject 2> if visible: what touches what, when the contact starts and ends.\n- Refer to the woman as <Subject 1>. Refer to the man or any other person as <Subject 2>, and only if they are actually visible.\n- STRICTLY FORBIDDEN: describing how the subjects LOOK - no body shape, face, hair, skin, clothing, garment colors or accessories. Never mention what <Subject 1> or <Subject 2> is wearing (their appearance comes from a separate reference image and any appearance words here would corrupt the generation). Naming a body part as the thing that MOVES is allowed and required; describing its appearance is forbidden.\n- Only observable facts. Never use \"appears\", \"seems\", \"suggesting\", \"probably\", \"likely\". Do not describe things that do not happen.\n- Output nothing outside the two sections.\n\nVery important hint: {a}",
+      "values.a": [
+        "509",
+        0
+      ]
+    },
+    "class_type": "StringFormat",
+    "_meta": {
+      "title": "Форматировать текст видео"
+    }
+  },
+  "921": {
+    "inputs": {
+      "model_name": "Qwen3-VL-8B-Instruct-FP8",
+      "quantization": "None (FP16)",
+      "attention_mode": "sage",
+      "use_torch_compile": false,
+      "device": "cuda:0",
+      "preset_prompt": "📹 Video Summary",
+      "custom_prompt": [
+        "920",
+        0
+      ],
+      "max_tokens": 1024,
+      "temperature": 0.1,
+      "top_p": 0.9,
+      "num_beams": 1,
+      "repetition_penalty": 1.2,
+      "frame_count": 64,
+      "keep_model_loaded": false,
+      "seed": 1,
+      "video": [
+        "460",
+        0
+      ]
+    },
+    "class_type": "AILab_QwenVL_Advanced",
+    "_meta": {
+      "title": "QwenVL (Advanced)"
+    }
+  },
+  "922": {
+    "inputs": {
+      "f_string": "Analyze this reference image for identity-preserving video generation.\n\nRefer to the woman as <Subject 1>. Write at most two lines of dense text (no lists, no headings).\nInclude, in this order:\n- subject type\n- overall proportions and silhouette\n- face shape, hair color / length / style, and defining facial features, if visible\n- clothing: exact garment type and its EXACT color (e.g. \"white bikini\", never just \"bikini\"), materials, accessories, distinctive markings, and makeup if any\n- any features that must remain identical in every video frame\n\nClothing color is critical: state the precise color of every garment explicitly and unambiguously - it must be reproduced exactly as in this image.\nDo NOT describe the image background, camera angle, pose, lighting, composition, or action. Describe only the subject's stable appearance. Output nothing else."
+    },
+    "class_type": "StringFormat",
+    "_meta": {
+      "title": "Форматировать текст фото"
+    }
+  },
+  "923": {
+    "inputs": {
+      "upscale_method": "nearest-exact",
+      "megapixels": [
+        "924",
+        0
+      ],
+      "resolution_steps": 1,
+      "image": [
+        "460",
+        0
+      ]
+    },
+    "class_type": "ImageScaleToTotalPixels",
+    "_meta": {
+      "title": "Масштабировать изображение до общего количества пикселей"
+    }
+  },
+  "924": {
+    "inputs": {
+      "value": 1
+    },
+    "class_type": "PrimitiveFloat",
+    "_meta": {
+      "title": "Resolution (mp)"
+    }
+  },
+  "925": {
+    "inputs": {
+      "image": [
+        "923",
+        0
+      ]
+    },
+    "class_type": "GetImageSize",
+    "_meta": {
+      "title": "Получить размер изображения"
+    }
+  },
+  "926": {
+    "inputs": {
+      "text": "",
+      "clip": [
+        "928",
+        1
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "Кодирование текста CLIP (Запрос)"
+    }
+  },
+  "927": {
+    "inputs": {
+      "threshold": 0.5,
+      "refine_iterations": 2,
+      "individual_masks": false,
+      "model": [
+        "928",
+        0
+      ],
+      "image": [
+        "456",
+        0
+      ],
+      "conditioning": [
+        "926",
+        0
+      ]
+    },
+    "class_type": "SAM3_Detect",
+    "_meta": {
+      "title": "SAM3 Обнаружение"
+    }
+  },
+  "928": {
+    "inputs": {
+      "ckpt_name": "sam3.1_multiplex_fp16.safetensors"
+    },
+    "class_type": "CheckpointLoaderSimple",
+    "_meta": {
+      "title": "Загрузить сheckpoint"
+    }
+  }
+}
