@@ -147,7 +147,44 @@ def _load_dotenv(path: Path) -> None:
         os.environ.setdefault(k, v)
 
 
+def _inherit_container_env() -> None:
+    """Добрать переменные окружения контейнера (PID 1).
+
+    Штатно раннер запускает entrypoint пода, и ключи S3 (`AWS_*`/`S3_*`)
+    достаются процессу по наследству. Но после `git pull` раннер обычно
+    перезапускают руками из SSH, а у SSH-сессии окружение своё — процесс
+    поднимался без ключей, boto3 писал `Unable to locate credentials`, и
+    результаты молча переставали уезжать в S3. Заметить это можно было только
+    по логу, а цена — единственная копия результатов на поде.
+
+    Поэтому недостающее берём прямо у PID 1: способ запуска больше ни на что
+    не влияет. Уже заданные переменные не трогаем — явный env и `.env` главнее.
+    Не Linux / нет procfs — тихо выходим, поведение прежнее.
+    """
+    try:
+        raw = Path("/proc/1/environ").read_bytes()
+    except OSError:
+        return
+    added: list[str] = []
+    for chunk in raw.split(b"\0"):
+        if not chunk:
+            continue
+        try:
+            key, sep, value = chunk.decode().partition("=")
+        except UnicodeDecodeError:
+            continue
+        if not sep or not key or key in os.environ:
+            continue
+        if not key.startswith(("AWS_", "S3_")):
+            continue
+        os.environ[key] = value
+        added.append(key)
+    if added:
+        log.info("окружение контейнера добрано у PID 1: %s", ", ".join(sorted(added)))
+
+
 _load_dotenv(ROOT / ".env")
+_inherit_container_env()
 CONFIG_PATH = Path(os.environ.get("CONFIG", STORAGE / "config.yaml"))
 
 
