@@ -25,6 +25,8 @@ import logging
 import os
 import re
 import secrets
+import shutil
+import subprocess
 import time
 import uuid
 import tempfile
@@ -71,13 +73,43 @@ from video_workflow_builder import (
 # bootstrap
 
 ROOT = Path(__file__).parent
-# STORAGE вынесен в env, потому что на RunPod entrypoint пода при каждом старте
-# делает `rm -rf /workspace/workflow-runner && git clone` — всё, что лежит внутри
-# репозитория, пропадает вместе с прогонами (и незакоммиченными jobs/*.json).
-# RUNNER_STORAGE=/workspace/runner-state переносит состояние наружу, и прогон
-# переживает рестарт пода. По умолчанию — прежний путь, поведение не меняется.
-STORAGE = Path(os.environ.get("RUNNER_STORAGE") or (ROOT / "storage"))
+
+
+def _persistent_root() -> Path | None:
+    """Каталог-носитель, который переживает пересоздание каталога репозитория.
+
+    На RunPod entrypoint пода на каждый старт контейнера делает
+    `rm -rf /workspace/<repo> && git clone`: всё, что лежит ВНУТРИ репозитория,
+    исчезает вместе с прогонами, залитыми шаблонами и живым config.yaml. Сам
+    `/workspace` — персистентный volume, поэтому состояние надо держать рядом
+    с репозиторием, а не в нём.
+
+    Возвращает volume, только если репозиторий действительно лежит прямо в нём
+    (`/workspace/workflow-runner`). В любой другой раскладке — в том числе при
+    локальной разработке — None, и путь остаётся прежним `<repo>/storage`.
+    """
+    raw = (os.environ.get("RUNNER_PERSIST_ROOT") or "/workspace").strip()
+    if not raw:
+        return None
+    try:
+        volume = Path(raw)
+        if volume.is_dir() and ROOT.parent == volume:
+            return volume
+    except OSError:
+        pass
+    return None
+
+
+_PERSIST_ROOT = _persistent_root()
+# RUNNER_STORAGE перебивает автоопределение — на случай нестандартной раскладки.
+STORAGE = Path(
+    os.environ.get("RUNNER_STORAGE")
+    or (_PERSIST_ROOT / f"{ROOT.name}-state" if _PERSIST_ROOT else ROOT / "storage")
+)
 RUNS = STORAGE / "runs"
+# Шаблоны, залитые через UI. `<repo>/jobs` — сид из git и пересоздаётся клоном,
+# поэтому загруженное пользователем кладём сюда, рядом с остальным состоянием.
+TEMPLATES = STORAGE / "jobs"
 
 
 _ENV_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
@@ -117,6 +149,68 @@ def _load_dotenv(path: Path) -> None:
 
 _load_dotenv(ROOT / ".env")
 CONFIG_PATH = Path(os.environ.get("CONFIG", STORAGE / "config.yaml"))
+
+
+def _git_tracked(subdir: str) -> set[str]:
+    """Имена файлов, которые лежат в `subdir` по данным git. Нужны, чтобы при
+    переезде отличить сид из репозитория от того, что пользователь залил через
+    UI. Не репозиторий / нет git → пустое множество (переносим всё)."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(ROOT), "ls-files", "--", subdir],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    if out.returncode != 0:
+        return set()
+    return {Path(line).name for line in out.stdout.splitlines() if line.strip()}
+
+
+def _migrate_legacy_state() -> None:
+    """Однократный переезд состояния из `<repo>/storage` в персистентный STORAGE.
+
+    Запускается на первом старте после обновления: на живом поде прогоны,
+    config.yaml и залитые шаблоны ещё лежат внутри репозитория и умрут вместе
+    с ним при следующем рестарте. Ничего не перезаписывает — файл, который в
+    новом месте уже есть, считается более свежим и остаётся.
+    """
+    legacy = ROOT / "storage"
+    if STORAGE == legacy or not legacy.is_dir():
+        return
+    try:
+        STORAGE.mkdir(parents=True, exist_ok=True)
+        moved: list[str] = []
+        for src in legacy.iterdir():
+            dst = STORAGE / src.name
+            if dst.exists():
+                continue
+            shutil.move(str(src), str(dst))
+            moved.append(src.name)
+        if moved:
+            log.info("состояние перенесено в %s: %s", STORAGE, ", ".join(moved))
+    except OSError as e:
+        log.warning("перенос состояния в %s не удался: %s", STORAGE, e)
+
+    # Шаблоны, залитые через UI, лежат вперемешку с сидом из git — переносим
+    # только те, которых git не знает: иначе персистентная копия навсегда
+    # заслонила бы обновление шаблона, приехавшее с новым коммитом.
+    legacy_jobs = ROOT / "jobs"
+    if not legacy_jobs.is_dir():
+        return
+    tracked = _git_tracked("jobs")
+    try:
+        TEMPLATES.mkdir(parents=True, exist_ok=True)
+        for src in legacy_jobs.glob("*.json"):
+            if src.name in tracked or (TEMPLATES / src.name).exists():
+                continue
+            shutil.copy2(str(src), str(TEMPLATES / src.name))
+            log.info("шаблон %s перенесён в %s", src.name, TEMPLATES)
+    except OSError as e:
+        log.warning("перенос шаблонов в %s не удался: %s", TEMPLATES, e)
+
+
+_migrate_legacy_state()
 
 
 # ---------------------------------------------------------------------------
@@ -193,8 +287,32 @@ def _workflow_cfg_block() -> dict[str, Any]:
 
 
 def _resolve_workflow_template_path(template: str) -> Path:
+    """Путь к шаблону: сначала персистентный TEMPLATES (там всё, что залито
+    через UI и должно пережить пересоздание репозитория), потом `<repo>/jobs`
+    (сид из git). Несуществующий файл возвращается как путь в репозитории —
+    вызывающий код проверяет `.exists()` сам."""
     p = Path(template)
-    return p if p.is_absolute() else (ROOT / p)
+    if p.is_absolute():
+        return p
+    persisted = TEMPLATES / p.name
+    if persisted.exists():
+        return persisted
+    return ROOT / p
+
+
+def _template_dirs() -> list[Path]:
+    """Каталоги с шаблонами в порядке приоритета — для листингов и поиска."""
+    return [TEMPLATES, ROOT / "jobs"]
+
+
+def _find_template_file(name: str) -> Path | None:
+    """Существующий файл шаблона по имени (без пути) или None."""
+    safe = Path(name).name
+    for d in _template_dirs():
+        candidate = d / safe
+        if candidate.exists():
+            return candidate
+    return None
 
 
 def _node_ref(raw: Any, default_field: str = "text") -> tuple[str | None, str]:
@@ -486,6 +604,14 @@ def get_run(run_id: str) -> RunState:
     return state
 
 
+def _load_run(run_id: str) -> "RunState | None":
+    """`get_run` без исключения — для фоновых задач, где 404 не к кому вернуть."""
+    try:
+        return get_run(run_id)
+    except HTTPException:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # bridging PodPool → RunState events
 
@@ -597,7 +723,15 @@ def auth_dep(request: Request) -> None:
 # ---------------------------------------------------------------------------
 # FastAPI app
 
-app = FastAPI(title="Workflow Runner")
+@contextlib.asynccontextmanager
+async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
+    # `_startup_resume` объявлен ниже по файлу — к моменту старта приложения
+    # модуль уже импортирован целиком, имя резолвится нормально.
+    _startup_resume()
+    yield
+
+
+app = FastAPI(title="Workflow Runner", lifespan=_lifespan)
 
 # Static frontend
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
@@ -679,10 +813,15 @@ async def get_workflows_yaml() -> dict[str, Any]:
 async def list_workflows() -> dict[str, Any]:
     """List both: JSON files on disk in jobs/, and named entries in the
     active config. Helps the user see what's actually wired up."""
-    jobs_dir = ROOT / "jobs"
     files: list[dict[str, Any]] = []
-    if jobs_dir.exists():
+    seen: set[str] = set()
+    for jobs_dir in _template_dirs():
+        if not jobs_dir.exists():
+            continue
         for p in sorted(jobs_dir.glob("*.json")):
+            if p.name in seen:      # персистентная копия перекрывает сид из git
+                continue
+            seen.add(p.name)
             try:
                 wf = json.loads(p.read_text())
                 node_count = len(wf) if isinstance(wf, dict) else 0
@@ -694,6 +833,7 @@ async def list_workflows() -> dict[str, Any]:
                 "modified": p.stat().st_mtime,
                 "node_count": node_count,
             })
+    files.sort(key=lambda f: f["name"])
     cfg = load_config()
     wf_block = cfg.get("workflows") or {}
     defaults = wf_block.get("defaults") or {}
@@ -723,8 +863,10 @@ async def upload_workflow(file: UploadFile = File(...)) -> dict[str, Any]:
             "doesn't look like a ComfyUI API-format workflow "
             "(every node should have class_type). "
             "Use 'Save (API Format)' in ComfyUI Dev mode.")
-    (ROOT / "jobs").mkdir(exist_ok=True)
-    target = ROOT / "jobs" / name
+    # Пишем в персистентный каталог, а не в `<repo>/jobs`: тот пересоздаётся
+    # клоном на каждый рестарт пода, и залитый шаблон исчез бы вместе с ним.
+    TEMPLATES.mkdir(parents=True, exist_ok=True)
+    target = TEMPLATES / name
     target.write_bytes(body)
     return {"ok": True, "name": name, "node_count": len(parsed)}
 
@@ -836,8 +978,8 @@ async def detect_workflow(name: str) -> dict[str, Any]:
     """Inspect an uploaded JSON: is it a video flow, and which nodes drive
     each known field. Drives the 'select CSV columns' UI."""
     safe = Path(name).name
-    target = ROOT / "jobs" / safe
-    if not target.exists():
+    target = _find_template_file(safe)
+    if target is None:
         raise HTTPException(404, f"{safe} not found")
     try:
         wf = json.loads(target.read_text())
@@ -873,8 +1015,8 @@ async def register_workflow(name: str, body: dict[str, Any] = None) -> dict[str,
       otherwise all auto-detected fields are used.
     """
     safe = Path(name).name
-    target = ROOT / "jobs" / safe
-    if not target.exists():
+    target = _find_template_file(safe)
+    if target is None:
         raise HTTPException(404, f"{safe} not found")
     try:
         wf = json.loads(target.read_text())
@@ -938,13 +1080,16 @@ async def register_all_workflows() -> dict[str, Any]:
     config. Existing entries are NEVER overwritten — hand-written mappings
     (multi-stage graphs, curated video fields) always win; re-register those
     individually if really needed."""
-    jobs_dir = ROOT / "jobs"
     cfg = load_config()
     wfs = cfg.setdefault("workflows", {}).setdefault("workflows", {}) or {}
     registered_now: list[str] = []
     skipped: list[str] = []
     errors: list[dict[str, str]] = []
-    for p in sorted(jobs_dir.glob("*.json")) if jobs_dir.exists() else []:
+    candidates: dict[str, Path] = {}
+    for jobs_dir in reversed(_template_dirs()):   # персистентный каталог главнее
+        if jobs_dir.exists():
+            candidates.update({p.name: p for p in jobs_dir.glob("*.json")})
+    for _, p in sorted(candidates.items()):
         key = p.stem
         if key in wfs:
             skipped.append(key)
@@ -1049,10 +1194,11 @@ async def workflow_universal_csv(name: str) -> StreamingResponse:
 @app.delete("/api/workflows/{name}", dependencies=[Depends(auth_dep)])
 async def delete_workflow(name: str) -> dict[str, Any]:
     safe = Path(name).name
-    target = ROOT / "jobs" / safe
-    if not target.exists():
+    removed_files = [d / safe for d in _template_dirs() if (d / safe).exists()]
+    if not removed_files:
         raise HTTPException(404)
-    target.unlink()
+    for target in removed_files:
+        target.unlink()
 
     cfg = load_config()
     wf_block = cfg.setdefault("workflows", {})
@@ -1096,7 +1242,7 @@ async def test_pod(body: dict[str, Any]) -> dict[str, Any]:
     cfg = load_config()
     missing_per_wf: dict[str, list[str]] = {}
     for name, spec in (cfg["workflows"].get("workflows") or {}).items():
-        tpl = ROOT / spec.get("template", "")
+        tpl = _resolve_workflow_template_path(spec.get("template", ""))
         if not tpl.exists():
             continue
         wf = json.loads(tpl.read_text())
@@ -1324,6 +1470,29 @@ async def add_run_inputs(
 
 RUN_QUEUE: list[str] = []                 # run_ids waiting, FIFO by enqueue order
 _queue_task: "asyncio.Task | None" = None
+QUEUE_PATH = STORAGE / "queue.json"
+
+
+def _save_queue() -> None:
+    """Очередь живёт в памяти процесса, а пережить она должна и рестарт пода —
+    поэтому после каждого изменения дублируется на диск, рядом с прогонами."""
+    try:
+        STORAGE.mkdir(parents=True, exist_ok=True)
+        QUEUE_PATH.write_text(json.dumps(RUN_QUEUE))
+    except OSError as e:
+        log.warning("не удалось сохранить очередь прогонов: %s", e)
+
+
+def _load_queue() -> list[str]:
+    """Очередь с прошлого запуска. Прогоны, чьи каталоги уже удалены, отсеиваются."""
+    try:
+        data = json.loads(QUEUE_PATH.read_text())
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return [rid for rid in data
+            if isinstance(rid, str) and (RUNS / rid).is_dir()]
 
 
 def _validate_run(state: RunState) -> None:
@@ -1372,6 +1541,18 @@ def _memory_cfg(cfg: dict[str, Any]) -> tuple[int, bool]:
     return free_every, bool(mem.get("unload_models", True))
 
 
+def _completed_indexes(state: RunState) -> set[int]:
+    """Строки CSV, которые уже посчитаны и скачаны. При обычном запуске их нет,
+    при возобновлении после рестарта — это всё, что успел прошлый процесс."""
+    done: set[int] = set()
+    for j in state.jobs:
+        if j.get("status") == "done" and j.get("idx") is not None:
+            done.add(int(j["idx"]))
+    if done:
+        log.info("прогон %s: пропускаю %d уже готовых джоб", state.run_id, len(done))
+    return done
+
+
 async def _execute_image_run(state: RunState) -> None:
     cfg = load_config()
     pod_cfgs = [
@@ -1386,7 +1567,7 @@ async def _execute_image_run(state: RunState) -> None:
     for spec in (wf_block.get("workflows") or {}).values():
         t = spec.get("template")
         if t and not Path(t).is_absolute():
-            spec["template"] = str((ROOT / t).resolve())
+            spec["template"] = str(_resolve_workflow_template_path(t).resolve())
     wf_path = state.dir / "workflows.yaml"
     wf_path.write_text(yaml.safe_dump(wf_block, sort_keys=False, allow_unicode=True))
     registry = WorkflowRegistry(wf_path)
@@ -1405,7 +1586,7 @@ async def _execute_image_run(state: RunState) -> None:
     )
     pool.free_every, pool.free_unload_models = _memory_cfg(cfg)
     csv_jobs = load_jobs(state.dir / "jobs.csv")
-    await _run_pool(state, pool, csv_jobs)
+    await _run_pool(state, pool, csv_jobs, skip=_completed_indexes(state))
 
 
 async def _execute_video_run(state: RunState) -> None:
@@ -1419,6 +1600,7 @@ async def _execute_video_run(state: RunState) -> None:
         raise RuntimeError("no pods configured")
     video_jobs = load_video_jobs(state.dir / "jobs.csv")
     flows = _resolve_video_flows(cfg, video_jobs)
+    skip = _completed_indexes(state)
     s3 = _s3_from_config(cfg.get("s3") or {})
     state.started_at = time.time()
     state.finished_at = None
@@ -1426,7 +1608,8 @@ async def _execute_video_run(state: RunState) -> None:
     await state.emit("run_started")
     free_every, free_unload = _memory_cfg(cfg)
     await _run_video_pool(state, pod_cfgs, video_jobs, flows, s3,
-                          free_every=free_every, free_unload=free_unload)
+                          free_every=free_every, free_unload=free_unload,
+                          skip=skip)
 
 
 async def _execute_run(state: RunState) -> None:
@@ -1463,13 +1646,16 @@ async def _queue_loop() -> None:
             if not RUN_QUEUE:
                 break
             run_id = RUN_QUEUE[0]
-            state = RUN_STATES.get(run_id)
+            # После рестарта прогон есть на диске, но не в памяти — поднимаем.
+            state = RUN_STATES.get(run_id) or _load_run(run_id)
             if state is None:
                 RUN_QUEUE.pop(0)
+                _save_queue()
                 continue
             await _execute_run(state)      # blocks until this run finishes
             if RUN_QUEUE and RUN_QUEUE[0] == run_id:
                 RUN_QUEUE.pop(0)
+                _save_queue()
             # refresh positions for whoever is left waiting
             for rid in list(RUN_QUEUE):
                 st = RUN_STATES.get(rid)
@@ -1477,6 +1663,148 @@ async def _queue_loop() -> None:
                     await st.emit("queue_update")
     finally:
         _queue_task = None
+
+
+# ---------------------------------------------------------------------------
+# Возобновление после рестарта
+#
+# Раннер — обычный процесс: его убивает и рестарт пода, и перезапуск после
+# git pull. Прогон при этом не «ломается» — весь его прогресс лежит в
+# storage/runs/<id>/status.json (пишется на каждое событие), а результаты уже
+# готовых джоб скачаны в outputs/ и залиты в S3. Не хватало только того, кто
+# после старта дочитает эту картину и доведёт пакет до конца.
+
+
+def _interrupted_runs() -> list[str]:
+    """Прогоны, которые прошлый процесс не довёл до конца: старт есть, финиша
+    нет, отмены не было и осталась хотя бы одна незавершённая джоба."""
+    out: list[str] = []
+    if not RUNS.exists():
+        return out
+    for d in sorted(RUNS.iterdir()):
+        sj = d / "status.json"
+        if not sj.is_file():
+            continue
+        try:
+            data = json.loads(sj.read_text())
+        except (OSError, ValueError):
+            continue
+        if not data.get("started_at") or data.get("finished_at"):
+            continue
+        if data.get("cancelled"):
+            continue
+        jobs = data.get("jobs") or []
+        if not any(j.get("status") != "done" for j in jobs):
+            continue
+        out.append(d.name)
+    return out
+
+
+def _rearm_interrupted(state: RunState) -> int:
+    """Вернуть прерванные джобы в очередь.
+
+    `done` не трогаем — их файлы скачаны и уже в S3, генерировать заново незачем.
+    А вот `running`/`stalled` пережить рестарт не могли: очередь ComfyUI умирает
+    вместе с подом, так что эти джобы возвращаются в `pending` и уйдут на под
+    заново. Счётчики времени сбрасываем, иначе ETA считался бы от старта,
+    которого уже нет.
+    """
+    rearmed = 0
+    for j in state.jobs:
+        if j.get("status") in ("running", "stalled"):
+            j["status"] = "pending"
+            j["error"] = None
+            j["resumed"] = True
+            j.pop("progress", None)
+            j.pop("started_ts", None)
+            rearmed += 1
+    # Прогон снова считается незапущенным: иначе `_any_run_active` увидел бы
+    # вечно активный ран и очередь никогда бы не тронулась с места.
+    state.started_at = None
+    state.finished_at = None
+    return rearmed
+
+
+async def _wait_for_pods(timeout: float = 1800.0) -> bool:
+    """Дождаться, пока ComfyUI на подах снова отвечает.
+
+    После рестарта пода ComfyUI поднимается минутами: entrypoint успевает
+    доставить кастом-ноды, поставить requirements и прогреть модели. Возобновлять
+    раньше нельзя — submit упал бы, раннер сжёг бы все попытки и пометил джобы
+    `failed` на живом, просто ещё не готовом поде.
+    """
+    cfg = load_config()
+    pods = cfg.get("pods") or []
+    if not pods:
+        log.warning("возобновление: поды не настроены")
+        return False
+    import aiohttp
+    deadline = time.monotonic() + timeout
+    delay = 5.0
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as s:
+        while time.monotonic() < deadline:
+            for p in pods:
+                url = str(p.get("url") or "").rstrip("/")
+                if not url:
+                    continue
+                headers = ({"Authorization": f"Bearer {p['api_key']}"}
+                           if p.get("api_key") else {})
+                try:
+                    async with s.get(f"{url}/system_stats", headers=headers) as r:
+                        if r.status == 200:
+                            log.info("возобновление: %s отвечает", url)
+                            return True
+                except Exception:
+                    pass
+            await asyncio.sleep(delay)
+            delay = min(delay * 1.5, 30.0)
+    log.warning("возобновление: под не ответил за %.0f c — прогоны оставлены "
+                "в очереди, запустите вручную", timeout)
+    return False
+
+
+async def _resume_after_restart() -> None:
+    """Поднять прерванные и ждавшие очереди прогоны и доработать их до конца."""
+    try:
+        interrupted = _interrupted_runs()
+        queued = [rid for rid in _load_queue() if rid not in interrupted]
+        if not interrupted and not queued:
+            return
+        log.info("после рестарта: прервано прогонов %d, ждало очереди %d",
+                 len(interrupted), len(queued))
+
+        # Порядок важен: сначала прерванные (их уже начали считать), потом те,
+        # что и так ждали своей очереди.
+        for rid in interrupted + queued:
+            if rid not in RUN_QUEUE:
+                RUN_QUEUE.append(rid)
+        _save_queue()
+
+        for rid in interrupted:
+            state = _load_run(rid)
+            if state is None:
+                continue
+            rearmed = _rearm_interrupted(state)
+            done = sum(1 for j in state.jobs if j.get("status") == "done")
+            log.info("возобновляю %s: готово %d, заново %d, всего %d",
+                     rid, done, rearmed, len(state.jobs))
+            await state.emit("run_resumed")
+
+        if not await _wait_for_pods():
+            return
+        _ensure_queue_worker()
+    except Exception as e:
+        log.exception("возобновление после рестарта не удалось: %s", e)
+
+
+def _startup_resume() -> None:
+    """Вызывается из lifespan на старте приложения."""
+    if (os.environ.get("RUNNER_AUTORESUME", "1").strip().lower()
+            in ("0", "false", "no", "off")):
+        log.info("автовозобновление выключено (RUNNER_AUTORESUME)")
+        return
+    # Фоном: старт HTTP-сервера не должен ждать, пока поднимется под.
+    asyncio.create_task(_resume_after_restart())
 
 
 @app.post("/api/runs/{run_id}/queue", dependencies=[Depends(auth_dep)])
@@ -1487,6 +1815,7 @@ async def queue_run(run_id: str) -> dict[str, Any]:
     state = get_run(run_id)
     _validate_run(state)
     RUN_QUEUE.append(run_id)
+    _save_queue()
     position = len(RUN_QUEUE)
     await state.emit("queued", position=position)
     _ensure_queue_worker()
@@ -1502,9 +1831,10 @@ async def start_run(run_id: str) -> dict[str, Any]:
     return {"ok": True}
 
 
-async def _run_pool(state: RunState, pool: WebPool, jobs) -> None:
+async def _run_pool(state: RunState, pool: WebPool, jobs,
+                    skip: set[int] | None = None) -> None:
     try:
-        await pool.run(jobs)
+        await pool.run(jobs, skip=skip)
     except Exception as e:
         log.exception("pool crashed: %s", e)
     finally:
@@ -1654,11 +1984,11 @@ async def delete_run(run_id: str) -> dict[str, Any]:
     target = (RUNS / run_id).resolve()
     if not str(target).startswith(str(RUNS.resolve())) or not target.exists():
         raise HTTPException(404)
-    import shutil
     shutil.rmtree(target)
     RUN_STATES.pop(run_id, None)
     if run_id in RUN_QUEUE:
         RUN_QUEUE.remove(run_id)
+        _save_queue()
     return {"ok": True}
 
 
@@ -1669,6 +1999,7 @@ async def cancel_run(run_id: str) -> dict[str, Any]:
     # Drop from the queue if it was waiting.
     if run_id in RUN_QUEUE:
         RUN_QUEUE.remove(run_id)
+        _save_queue()
     await state.emit("run_cancelled")
     # Mark not-yet-finished jobs as cancelled (running ones get aborted below).
     # `stalled` — тоже незавершённая джоба: без неё отмена оставила бы её висеть.
@@ -1863,13 +2194,20 @@ async def _run_video_pool(
     s3: Any,
     free_every: int = 0,
     free_unload: bool = True,
+    skip: set[int] | None = None,
 ) -> None:
-    """Execute video jobs, each patched via its registered flow mapping."""
+    """Execute video jobs, each patched via its registered flow mapping.
+
+    `skip` — индексы уже готовых джоб (возобновление после рестарта): их файлы
+    скачаны, считать заново нечего. Сквозная нумерация по CSV сохраняется."""
     import aiohttp
     from pod_client import PodClient, PodError
 
     queue: asyncio.Queue = asyncio.Queue()
+    skip = skip or set()
     for i, j in enumerate(jobs):
+        if i in skip:
+            continue
         await queue.put((i, j))
 
     done_counter = {"n": 0}   # общий на всех воркеров счётчик для RAM-чистки

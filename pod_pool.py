@@ -64,18 +64,20 @@ class PodPool:
         self.queue: asyncio.Queue[JobItem | None] = asyncio.Queue()
         # cache of (pod_name, image_path) -> remote filename to skip re-upload
         self._upload_cache: dict[tuple[str, str], str] = {}
-        # RAM-чистка: каждые free_every завершённых джоб дёргаем ComfyUI
-        # POST /free (0 = выключено). Настраивается блоком memory: в конфиге.
-        self.free_every: int = 0
-        self.free_unload_models: bool = True
-        self._jobs_done = 0
 
     @staticmethod
     def _job_images(job: Job) -> tuple[str, ...]:
         return tuple(img for img in (job.input_images or (job.input_image,)) if img)
 
-    async def run(self, jobs: list[Job]) -> None:
+    async def run(self, jobs: list[Job], skip: set[int] | None = None) -> None:
+        """`skip` — индексы строк CSV, которые считать не надо (при возобновлении
+        прогона это уже готовые джобы). Нумерация остаётся сквозной по CSV:
+        `idx` связывает джобу со строкой статуса и с именем файла на выходе,
+        поэтому пропущенные строки именно пропускаются, а не выкидываются."""
+        skip = skip or set()
         for i, j in enumerate(jobs):
+            if i in skip:
+                continue
             await self.queue.put(JobItem(idx=i, job=j))
 
         if self.dry_run:
@@ -85,9 +87,7 @@ class PodPool:
                     workers.append(asyncio.create_task(
                         self._worker(None, slot, pod_name=pod.name),
                         name=f"{pod.name}#{slot}"))
-            for _ in workers:
-                await self.queue.put(None)
-            await asyncio.gather(*workers)
+            await self._drain(workers)
             return
 
         timeout = aiohttp.ClientTimeout(total=None, sock_read=300)
@@ -99,9 +99,29 @@ class PodPool:
                     workers.append(asyncio.create_task(
                         self._worker(client, slot), name=f"{pod.name}#{slot}"))
 
-            for _ in workers:
-                await self.queue.put(None)
-            await asyncio.gather(*workers)
+            await self._drain(workers)
+
+    async def _drain(self, workers: list[asyncio.Task]) -> None:
+        """Дождаться, пока очередь реально опустеет, и снять воркеров.
+
+        Раньше конец работы отмечали poison pill'ами, которые клали в очередь
+        сразу за джобами. Упавшая джоба возвращается в очередь — то есть ЗА
+        пилюли, и воркеры выходили раньше, чем доходили до повтора: ретрай
+        молча терялся, а строка навсегда оставалась в статусе `running`
+        (батч при этом считался завершённым). `queue.join()` ждёт именно
+        необработанные элементы, поэтому повторы больше не теряются.
+        """
+        if not workers:
+            # Ни одного пода — потреблять очередь некому, ждать нечего.
+            # (В вебе такой прогон не стартует: _execute_run падает раньше.)
+            log.warning("нет ни одного воркера — очередь оставлена необработанной")
+            return
+        try:
+            await self.queue.join()
+        finally:
+            for w in workers:
+                w.cancel()
+            await asyncio.gather(*workers, return_exceptions=True)
 
     async def _worker(self, client: PodClient | None, slot: int,
                       pod_name: str | None = None) -> None:
@@ -119,11 +139,6 @@ class PodPool:
                     await self._handle_dry(name, item)
                 else:
                     await self._handle(client, item)
-                    self._jobs_done += 1
-                    if self.free_every and self._jobs_done % self.free_every == 0:
-                        log.info("[%s#%d] RAM cleanup: ComfyUI /free after %d jobs",
-                                 name, slot, self._jobs_done)
-                        await client.free(self.free_unload_models)
             except Exception as e:
                 item.attempts += 1
                 log.warning("[%s#%d] job %d failed (attempt %d): %s",
